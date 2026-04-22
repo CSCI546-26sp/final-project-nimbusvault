@@ -11,6 +11,7 @@ enum class ChunkTier { COLD, WARM, HOT };
 
 struct ChunkAccessState {
     double   ewma_rate    = 0.0;   // exponentially weighted moving average req/s
+    double   last_window_rate = 0.0; // most recent window's instantaneous req/s
     uint64_t last_update_ms = 0;
     int      windows_above  = 0;   // consecutive windows above threshold
     int      windows_below  = 0;   // consecutive windows below threshold

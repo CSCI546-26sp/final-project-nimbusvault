@@ -61,10 +61,12 @@ struct MetaWal::Impl {
         rocksdb::Options opts;
         opts.create_if_missing = true;
         opts.wal_dir           = dir + "/wal";
-        auto status = rocksdb::DB::Open(opts, dir + "/metawal", &db);
+        rocksdb::DB* raw_db = nullptr;
+        auto status = rocksdb::DB::Open(opts, dir + "/metawal", &raw_db);
         if (!status.ok()) {
             throw std::runtime_error("MetaWal open failed: " + status.ToString());
         }
+        db.reset(raw_db);
         std::string val;
         if (db->Get(rocksdb::ReadOptions(), "meta/last_index", &val).ok()) {
             uint64_t be;

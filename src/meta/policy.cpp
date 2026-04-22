@@ -15,6 +15,7 @@ void AdaptivePolicy::record_accesses(const std::string& chunk_id,
     double instant_rate = (window_ms > 0)
         ? (static_cast<double>(count) / (window_ms / 1000.0))
         : 0.0;
+    s.last_window_rate = instant_rate;
 
     if (s.last_update_ms == 0) {
         s.ewma_rate = instant_rate;
@@ -30,22 +31,24 @@ PolicyDecision AdaptivePolicy::evaluate(const std::string& chunk_id) {
     std::lock_guard<std::mutex> lk(mu_);
     auto& s = state_[chunk_id];
 
-    ChunkTier new_tier = classify(s.ewma_rate);
+    // Drive transition hysteresis using the latest window classification.
+    // EWMA is still tracked for metrics/observability via get_rate().
+    ChunkTier desired_tier = classify(s.last_window_rate);
 
     bool changed = false;
-    if (new_tier > s.tier) {
+    if (desired_tier > s.tier) {
         s.windows_above++;
         s.windows_below = 0;
         if (s.windows_above >= cfg_.promote_windows) {
-            s.tier         = new_tier;
+            s.tier         = desired_tier;
             s.windows_above = 0;
             changed = true;
         }
-    } else if (new_tier < s.tier) {
+    } else if (desired_tier < s.tier) {
         s.windows_below++;
         s.windows_above = 0;
         if (s.windows_below >= cfg_.demote_windows) {
-            s.tier         = new_tier;
+            s.tier         = desired_tier;
             s.windows_below = 0;
             changed = true;
         }
@@ -59,7 +62,7 @@ PolicyDecision AdaptivePolicy::evaluate(const std::string& chunk_id) {
                      chunk_id, rf_for_tier(s.tier), s.ewma_rate);
     }
 
-    return PolicyDecision{chunk_id, rf_for_tier(s.tier), s.tier, changed};
+    return PolicyDecision{chunk_id, rf_for_tier(desired_tier), desired_tier, changed};
 }
 
 double AdaptivePolicy::get_rate(const std::string& chunk_id) const {
