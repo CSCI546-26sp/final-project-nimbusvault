@@ -61,10 +61,12 @@ struct MetaWal::Impl {
         rocksdb::Options opts;
         opts.create_if_missing = true;
         opts.wal_dir           = dir + "/wal";
-        auto status = rocksdb::DB::Open(opts, dir + "/metawal", &db);
+        rocksdb::DB* raw_db = nullptr;
+        auto status = rocksdb::DB::Open(opts, dir + "/metawal", &raw_db);
         if (!status.ok()) {
             throw std::runtime_error("MetaWal open failed: " + status.ToString());
         }
+        db.reset(raw_db);
         std::string val;
         if (db->Get(rocksdb::ReadOptions(), "meta/last_index", &val).ok()) {
             uint64_t be;
@@ -134,6 +136,14 @@ void MetaWal::replay(const ReplayCallback& cb) {
         cb(decode_entry(idx, raw));
     }
     spdlog::info("WAL replay complete: {} entries applied", impl_->committed_);
+}
+
+bool MetaWal::read_entry(uint64_t log_index, WalEntry& out) const {
+    std::string raw;
+    auto s = impl_->db->Get(rocksdb::ReadOptions(), wal_key(log_index), &raw);
+    if (!s.ok()) return false;
+    out = decode_entry(log_index, raw);
+    return true;
 }
 
 uint64_t MetaWal::last_log_index() const  { return impl_->last_index_; }

@@ -5,7 +5,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-list(INSERT CMAKE_PREFIX_PATH 0 /opt/homebrew)
+if(APPLE)
+  list(INSERT CMAKE_PREFIX_PATH 0 /opt/homebrew)
+endif()
 
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE RelWithDebInfo)
@@ -28,25 +30,47 @@ FetchContent_MakeAvailable(googletest)
 
 find_package(RocksDB QUIET)
 if(NOT RocksDB_FOUND)
-  find_library(ROCKSDB_LIB rocksdb PATHS /opt/homebrew/lib NO_DEFAULT_PATH REQUIRED)
-  find_path(ROCKSDB_INCLUDE rocksdb/db.h PATHS /opt/homebrew/include NO_DEFAULT_PATH REQUIRED)
-  find_library(SNAPPY_LIB snappy PATHS /opt/homebrew/lib NO_DEFAULT_PATH REQUIRED)
+  if(APPLE)
+    find_library(ROCKSDB_LIB rocksdb PATHS /opt/homebrew/lib NO_DEFAULT_PATH REQUIRED)
+    find_path(ROCKSDB_INCLUDE rocksdb/db.h PATHS /opt/homebrew/include NO_DEFAULT_PATH REQUIRED)
+    find_library(SNAPPY_LIB snappy PATHS /opt/homebrew/lib NO_DEFAULT_PATH)
+  else()
+    find_library(ROCKSDB_LIB rocksdb REQUIRED)
+    find_path(ROCKSDB_INCLUDE rocksdb/db.h REQUIRED)
+    find_library(SNAPPY_LIB snappy)
+  endif()
   add_library(RocksDB::rocksdb UNKNOWN IMPORTED)
+  set(_rocksdb_links "")
+  if(SNAPPY_LIB)
+    list(APPEND _rocksdb_links "${SNAPPY_LIB}")
+  endif()
   set_target_properties(RocksDB::rocksdb PROPERTIES
     IMPORTED_LOCATION "${ROCKSDB_LIB}"
     INTERFACE_INCLUDE_DIRECTORIES "${ROCKSDB_INCLUDE}"
-    INTERFACE_LINK_LIBRARIES "${SNAPPY_LIB}")
+    INTERFACE_LINK_LIBRARIES "${_rocksdb_links}")
 endif()
 
+find_package(Protobuf CONFIG QUIET)
+if(NOT Protobuf_FOUND)
+  find_package(Protobuf REQUIRED)
+endif()
 find_package(gRPC CONFIG REQUIRED)
-find_package(Protobuf CONFIG REQUIRED)
 
 set(PROTO_DIR "${CMAKE_SOURCE_DIR}/proto")
 set(PROTO_OUT "${CMAKE_BINARY_DIR}/proto_gen")
 file(MAKE_DIRECTORY "${PROTO_OUT}")
 
-find_program(PROTOC_BIN protoc PATHS /opt/homebrew/bin NO_DEFAULT_PATH REQUIRED)
-find_program(GRPC_CPP_PLUGIN grpc_cpp_plugin PATHS /opt/homebrew/bin NO_DEFAULT_PATH REQUIRED)
+if(APPLE)
+  find_program(PROTOC_BIN protoc PATHS /opt/homebrew/bin NO_DEFAULT_PATH)
+  find_program(GRPC_CPP_PLUGIN grpc_cpp_plugin PATHS /opt/homebrew/bin NO_DEFAULT_PATH)
+endif()
+
+if(NOT PROTOC_BIN)
+  find_program(PROTOC_BIN protoc REQUIRED)
+endif()
+if(NOT GRPC_CPP_PLUGIN)
+  find_program(GRPC_CPP_PLUGIN grpc_cpp_plugin REQUIRED)
+endif()
 
 function(generate_grpc_proto PROTO_NAME)
   set(PROTO_FILE "${PROTO_DIR}/${PROTO_NAME}.proto")
@@ -102,8 +126,25 @@ target_link_libraries(nimbus_meta PUBLIC
   gRPC::grpc++
 )
 
+add_library(nimbus_storage STATIC
+  src/storage/chunk_store.cpp
+  src/storage/storage_rpc.cpp
+  src/storage/stats_reporter.cpp
+)
+target_include_directories(nimbus_storage PUBLIC src)
+target_link_libraries(nimbus_storage PUBLIC
+  nimbus_common
+  RocksDB::rocksdb
+  proto_storage
+  proto_meta
+  gRPC::grpc++
+)
+
 add_executable(meta_server src/bin/meta_server.cpp)
 target_link_libraries(meta_server PRIVATE nimbus_meta)
+
+add_executable(storage_server src/bin/storage_server.cpp)
+target_link_libraries(storage_server PRIVATE nimbus_storage)
 
 enable_testing()
 
@@ -112,9 +153,11 @@ add_executable(unit_tests
   tests/unit/test_meta_coordinator.cpp
   tests/unit/test_policy.cpp
   tests/unit/test_placement.cpp
+  tests/unit/test_chunk_store.cpp
 )
 target_link_libraries(unit_tests PRIVATE
   nimbus_meta
+  nimbus_storage
   GTest::gtest_main
 )
 target_include_directories(unit_tests PRIVATE src)
