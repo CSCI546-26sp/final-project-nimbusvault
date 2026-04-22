@@ -18,6 +18,7 @@
 #include <chrono>
 #include <csignal>
 #include <atomic>
+#include <vector>
 
 static std::atomic<bool> g_running{true};
 
@@ -32,6 +33,67 @@ static void print_usage() {
         "  --data   DATA_DIR\n"
         "  --peers  HOST:PORT,...   (followers if leader; leader if follower)\n"
         "  --mode   baseline|adaptive  (default: adaptive)\n";
+}
+
+static std::vector<std::string> split_nonempty(const std::string& s, char delim) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char c : s) {
+        if (c == delim) {
+            if (!cur.empty()) out.push_back(cur);
+            cur.clear();
+        } else {
+            cur.push_back(c);
+        }
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
+static void apply_wal_entry(nimbus::MetaCoordinator& coord, const nimbus::WalEntry& e) {
+    switch (e.type) {
+        case nimbus::WalEntryType::PUT_CHUNK: {
+            auto parts = split_nonempty(e.payload, '|');
+            if (parts.size() < 5) {
+                spdlog::warn("apply_wal_entry: malformed PUT_CHUNK payload idx={}", e.log_index);
+                return;
+            }
+            std::vector<std::string> replicas = split_nonempty(parts[4], ',');
+            coord.apply_put_chunk(parts[0],
+                                  static_cast<uint64_t>(std::stoull(parts[1])),
+                                  std::stoi(parts[2]),
+                                  replicas,
+                                  static_cast<uint64_t>(std::stoull(parts[3])));
+            return;
+        }
+        case nimbus::WalEntryType::DELETE_CHUNK: {
+            coord.apply_delete_chunk(e.payload);
+            return;
+        }
+        case nimbus::WalEntryType::RECONFIGURE_START: {
+            auto parts = split_nonempty(e.payload, '|');
+            if (parts.size() < 3) {
+                spdlog::warn("apply_wal_entry: malformed RECONFIGURE_START payload idx={}", e.log_index);
+                return;
+            }
+            auto old_set = split_nonempty(parts[1], ',');
+            auto new_set = split_nonempty(parts[2], ',');
+            coord.apply_reconfig_start(parts[0], old_set, new_set);
+            return;
+        }
+        case nimbus::WalEntryType::RECONFIGURE_COMMIT: {
+            auto parts = split_nonempty(e.payload, '|');
+            if (parts.size() < 2) {
+                spdlog::warn("apply_wal_entry: malformed RECONFIGURE_COMMIT payload idx={}", e.log_index);
+                return;
+            }
+            auto new_set = split_nonempty(parts[1], ',');
+            coord.apply_reconfig_commit(parts[0], new_set);
+            return;
+        }
+        default:
+            return;
+    }
 }
 
 int main(int argc, char** argv) {
@@ -76,9 +138,7 @@ int main(int argc, char** argv) {
 
     // Replay WAL on startup.
     wal.replay([&](const nimbus::WalEntry& e) {
-        // Dispatcher: route each entry type to coordinator.
-        // Full parsing wired once proto codegen is done.
-        spdlog::debug("WAL replay: type={} idx={}", static_cast<int>(e.type), e.log_index);
+        apply_wal_entry(coord, e);
     });
 
     nimbus::MetaReplication* repl    = nullptr;
@@ -86,14 +146,23 @@ int main(int argc, char** argv) {
 
     if (cfg.role == "leader") {
         repl = new nimbus::MetaReplication(wal, cfg, [&](uint64_t idx) {
-            spdlog::debug("on_commit: idx={}", idx);
-            // Full WAL entry dispatch wired in Day 2 once proto codegen done.
+            nimbus::WalEntry e;
+            if (!wal.read_entry(idx, e)) {
+                spdlog::warn("on_commit: missing WAL entry idx={}", idx);
+                return;
+            }
+            apply_wal_entry(coord, e);
         });
         for (auto& peer : cfg.peers) repl->add_follower(peer);
         spdlog::info("Leader ready with {} followers", cfg.peers.size());
     } else {
         follower = new nimbus::MetaFollower(wal, cfg, [&](uint64_t idx) {
-            spdlog::debug("follower on_commit: idx={}", idx);
+            nimbus::WalEntry e;
+            if (!wal.read_entry(idx, e)) {
+                spdlog::warn("follower on_commit: missing WAL entry idx={}", idx);
+                return;
+            }
+            apply_wal_entry(coord, e);
         });
         spdlog::info("Follower ready, leader at {}", cfg.peers.empty() ? "?" : cfg.peers[0]);
     }

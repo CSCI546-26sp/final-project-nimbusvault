@@ -35,6 +35,8 @@ public:
 
     void replay(const ReplayCallback& cb);
 
+    bool read_entry(uint64_t log_index, WalEntry& out) const;
+
     uint64_t last_log_index() const;
     uint64_t committed_index() const;
 

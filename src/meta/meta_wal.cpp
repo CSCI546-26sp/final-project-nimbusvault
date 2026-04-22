@@ -138,6 +138,14 @@ void MetaWal::replay(const ReplayCallback& cb) {
     spdlog::info("WAL replay complete: {} entries applied", impl_->committed_);
 }
 
+bool MetaWal::read_entry(uint64_t log_index, WalEntry& out) const {
+    std::string raw;
+    auto s = impl_->db->Get(rocksdb::ReadOptions(), wal_key(log_index), &raw);
+    if (!s.ok()) return false;
+    out = decode_entry(log_index, raw);
+    return true;
+}
+
 uint64_t MetaWal::last_log_index() const  { return impl_->last_index_; }
 uint64_t MetaWal::committed_index() const { return impl_->committed_; }
 
