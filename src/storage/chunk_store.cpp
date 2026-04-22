@@ -6,6 +6,8 @@
 #include <filesystem>
 #include <cstdio>
 #include <memory>
+#include <unordered_set>
+#include <vector>
 
 namespace nimbus {
 
@@ -119,6 +121,31 @@ uint64_t ChunkStore::latest_version(const std::string& chunk_id) {
     } catch (...) {
         return 0;
     }
+}
+
+std::vector<std::string> ChunkStore::list_chunk_ids() {
+    std::vector<std::string> out;
+    if (!impl_->db) return out;
+
+    constexpr const char* kPrefix = "chunk/";
+    constexpr size_t kPrefixLen = 6;
+
+    std::unordered_set<std::string> ids;
+    rocksdb::ReadOptions ro;
+    std::unique_ptr<rocksdb::Iterator> it(impl_->db->NewIterator(ro));
+    for (it->Seek(kPrefix); it->Valid(); it->Next()) {
+        const std::string key = it->key().ToString();
+        if (key.rfind(kPrefix, 0) != 0) break;
+
+        const size_t last_slash = key.rfind('/');
+        if (last_slash == std::string::npos || last_slash <= kPrefixLen) continue;
+
+        ids.insert(key.substr(kPrefixLen, last_slash - kPrefixLen));
+    }
+
+    out.reserve(ids.size());
+    for (const auto& id : ids) out.push_back(id);
+    return out;
 }
 
 } // namespace nimbus

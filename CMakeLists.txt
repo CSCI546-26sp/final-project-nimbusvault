@@ -139,6 +139,7 @@ target_link_libraries(nimbus_meta PUBLIC
 
 add_library(nimbus_storage STATIC
   src/storage/chunk_store.cpp
+  src/storage/replica_repair.cpp
   src/storage/storage_rpc.cpp
   src/storage/stats_reporter.cpp
 )

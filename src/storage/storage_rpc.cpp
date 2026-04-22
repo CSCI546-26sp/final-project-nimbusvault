@@ -1,8 +1,12 @@
 #include "storage_rpc.h"
+#include "stats_reporter.h"
+
+#include <algorithm>
 
 namespace nimbus {
 
-StorageRpcService::StorageRpcService(ChunkStore& store) : store_(store) {}
+StorageRpcService::StorageRpcService(ChunkStore& store, StatsReporter& reporter)
+    : store_(store), reporter_(reporter) {}
 
 grpc::Status StorageRpcService::WriteChunk(grpc::ServerContext*,
                                            const nimbus::storage::WriteChunkReq* req,
@@ -34,6 +38,7 @@ grpc::Status StorageRpcService::ReadChunk(grpc::ServerContext*,
     resp->set_ok(true);
     resp->set_data(data);
     resp->set_version(version);
+    reporter_.record_access(req->chunk_id());
     return grpc::Status::OK;
 }
 
@@ -46,6 +51,8 @@ grpc::Status StorageRpcService::FetchChunk(grpc::ServerContext*,
     if (!ok || version < req->version()) {
         return grpc::Status(grpc::StatusCode::NOT_FOUND, "chunk/version not found");
     }
+
+    reporter_.record_access(req->chunk_id());
 
     constexpr size_t kChunk = 64 * 1024;
     size_t off = 0;

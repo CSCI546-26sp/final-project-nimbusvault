@@ -5,9 +5,11 @@
 
 namespace nimbus {
 
+class StatsReporter;
+
 class StorageRpcService final : public nimbus::storage::StorageNode::Service {
 public:
-    explicit StorageRpcService(ChunkStore& store);
+    StorageRpcService(ChunkStore& store, StatsReporter& reporter);
 
     grpc::Status WriteChunk(grpc::ServerContext* ctx,
                             const nimbus::storage::WriteChunkReq* req,
@@ -27,6 +29,7 @@ public:
 
 private:
     ChunkStore& store_;
+    StatsReporter& reporter_;
 };
 
 } // namespace nimbus

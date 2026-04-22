@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <cstdint>
+#include <vector>
 
 namespace nimbus {
 
@@ -21,6 +22,9 @@ public:
 
     // Latest stored version for a chunk (0 = not found).
     uint64_t latest_version(const std::string& chunk_id);
+
+    // List chunk ids currently present in local storage.
+    std::vector<std::string> list_chunk_ids();
 
 private:
     struct Impl;

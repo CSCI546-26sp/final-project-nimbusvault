@@ -7,6 +7,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace nimbus {
 
@@ -17,6 +18,8 @@ public:
     void record_access(const std::string& chunk_id);
     void run_once();
     void stop();
+    std::vector<std::string> assigned_chunk_ids() const;
+    bool has_assignment_snapshot() const;
 
 private:
     float compute_load_fraction() const;
@@ -29,8 +32,10 @@ private:
     std::shared_ptr<grpc::Channel> channel_;
     std::unique_ptr<nimbus::meta::MetaCoordinator::Stub> stub_;
 
-    std::mutex mu_;
+    mutable std::mutex mu_;
     std::unordered_map<std::string, uint64_t> access_counts_;
+    std::vector<std::string> assigned_chunk_ids_;
+    bool has_assignment_snapshot_ = false;
 };
 
 } // namespace nimbus
