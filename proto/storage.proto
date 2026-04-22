@@ -1,0 +1,41 @@
+syntax = "proto3";
+package nimbus.storage;
+
+service StorageNode {
+  rpc WriteChunk(WriteChunkReq)          returns (WriteChunkResp);
+  rpc ReadChunk(ReadChunkReq)            returns (ReadChunkResp);
+  rpc FetchChunk(FetchChunkReq)          returns (stream ChunkData);
+  rpc DeleteChunkData(DeleteDataReq)     returns (DeleteDataResp);
+}
+
+// ── WriteChunk ────────────────────────────────────────────────────────────
+message WriteChunkReq {
+  string chunk_id = 1;
+  uint64 version  = 2;
+  bytes  data     = 3;
+}
+message WriteChunkResp { bool ok = 1; string error = 2; }
+
+// ── ReadChunk ─────────────────────────────────────────────────────────────
+message ReadChunkReq {
+  string chunk_id    = 1;
+  uint64 min_version = 2;   // refuse if local version < min_version
+}
+message ReadChunkResp {
+  bool   ok      = 1;
+  string error   = 2;
+  bytes  data    = 3;
+  uint64 version = 4;
+}
+
+// ── FetchChunk (server-side streaming for replica sync) ───────────────────
+message FetchChunkReq { string chunk_id = 1; uint64 version = 2; }
+message ChunkData {
+  bytes  data      = 1;
+  uint64 version   = 2;
+  bool   is_last   = 3;
+}
+
+// ── DeleteChunkData ───────────────────────────────────────────────────────
+message DeleteDataReq  { string chunk_id = 1; }
+message DeleteDataResp { bool ok = 1; string error = 2; }

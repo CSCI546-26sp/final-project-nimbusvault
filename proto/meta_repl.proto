@@ -1,0 +1,56 @@
+syntax = "proto3";
+package nimbus.repl;
+
+// Internal leader→follower replication protocol.
+service MetaReplication {
+  rpc AppendEntry(AppendEntryReq)       returns (AppendEntryResp);
+  rpc CommitEntry(CommitReq)            returns (CommitResp);
+  rpc InstallSnapshot(SnapshotReq)      returns (stream SnapshotChunk);
+  rpc FetchLogEntries(FetchLogReq)      returns (stream LogEntry);
+}
+
+// ── WAL entry types ───────────────────────────────────────────────────────
+enum EntryType {
+  PUT_CHUNK          = 0;
+  DELETE_CHUNK       = 1;
+  RECONFIGURE_START  = 2;
+  RECONFIGURE_COMMIT = 3;
+  NODE_HEARTBEAT     = 4;
+  POLICY_UPDATE      = 5;
+}
+
+message LogEntry {
+  uint64    log_index  = 1;
+  uint64    term       = 2;
+  EntryType type       = 3;
+  bytes     payload    = 4;   // serialized per-type proto
+}
+
+// ── AppendEntry ───────────────────────────────────────────────────────────
+message AppendEntryReq {
+  uint64   leader_term         = 1;
+  uint64   prev_log_index      = 2;
+  uint64   prev_log_term       = 3;
+  LogEntry entry               = 4;
+  uint64   leader_committed_lsn = 5;
+}
+message AppendEntryResp {
+  bool   success    = 1;
+  uint64 term       = 2;   // follower's current term (for stale-leader detection)
+  string error      = 3;
+}
+
+// ── CommitEntry ───────────────────────────────────────────────────────────
+message CommitReq  { uint64 log_index = 1; uint64 term = 2; }
+message CommitResp { bool ok = 1; }
+
+// ── InstallSnapshot ───────────────────────────────────────────────────────
+message SnapshotReq   { uint64 snapshot_lsn = 1; }
+message SnapshotChunk {
+  bytes  data          = 1;
+  bool   is_last_chunk = 2;
+  uint64 snapshot_lsn  = 3;
+}
+
+// ── FetchLogEntries ───────────────────────────────────────────────────────
+message FetchLogReq { uint64 from_index = 1; }

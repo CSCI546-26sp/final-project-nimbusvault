@@ -1,0 +1,67 @@
+syntax = "proto3";
+package nimbus.meta;
+
+service MetaCoordinator {
+  rpc PutChunk(PutChunkReq)           returns (PutChunkResp);
+  rpc GetChunkInfo(ChunkInfoReq)      returns (ChunkInfoResp);
+  rpc DeleteChunk(DeleteChunkReq)     returns (DeleteChunkResp);
+  rpc AddReplica(ReplicaChangeReq)    returns (ReplicaChangeResp);
+  rpc RemoveReplica(ReplicaChangeReq) returns (ReplicaChangeResp);
+  rpc NodeHeartbeat(HeartbeatReq)     returns (HeartbeatResp);
+}
+
+// ── PutChunk ──────────────────────────────────────────────────────────────
+message PutChunkReq {
+  string chunk_id  = 1;
+  uint64 size_bytes = 2;
+  int32  desired_rf = 3;
+}
+message PutChunkResp {
+  bool          ok          = 1;
+  string        error       = 2;
+  uint64        version     = 3;
+  repeated string replica_set = 4;  // node_ids to write to
+}
+
+// ── GetChunkInfo ──────────────────────────────────────────────────────────
+message ChunkInfoReq  { string chunk_id = 1; }
+message ChunkInfoResp {
+  bool          ok          = 1;
+  string        error       = 2;
+  ChunkMeta     meta        = 3;
+}
+
+message ChunkMeta {
+  string          chunk_id          = 1;
+  uint64          version           = 2;
+  repeated string replica_set       = 3;
+  int32           replication_factor = 4;
+  ConfigState     config_state      = 5;
+  repeated string old_replica_set   = 6;
+  uint64          size_bytes        = 7;
+}
+
+enum ConfigState {
+  STABLE       = 0;
+  TRANSITIONING = 1;
+}
+
+// ── DeleteChunk ───────────────────────────────────────────────────────────
+message DeleteChunkReq  { string chunk_id = 1; }
+message DeleteChunkResp { bool ok = 1; string error = 2; }
+
+// ── ReplicaChange ─────────────────────────────────────────────────────────
+message ReplicaChangeReq  { string chunk_id = 1; string node_id = 2; }
+message ReplicaChangeResp { bool ok = 1; string error = 2; }
+
+// ── NodeHeartbeat ─────────────────────────────────────────────────────────
+message HeartbeatReq {
+  string   node_id        = 1;
+  string   address        = 2;
+  float    load_fraction  = 3;
+  uint64   free_bytes     = 4;
+  uint64   total_bytes    = 5;
+  float    failure_rate_7d = 6;
+  map<string, uint64> chunk_access_counts = 7;
+}
+message HeartbeatResp { bool ok = 1; string leader_hint = 2; }
