@@ -126,8 +126,25 @@ target_link_libraries(nimbus_meta PUBLIC
   gRPC::grpc++
 )
 
+add_library(nimbus_storage STATIC
+  src/storage/chunk_store.cpp
+  src/storage/storage_rpc.cpp
+  src/storage/stats_reporter.cpp
+)
+target_include_directories(nimbus_storage PUBLIC src)
+target_link_libraries(nimbus_storage PUBLIC
+  nimbus_common
+  RocksDB::rocksdb
+  proto_storage
+  proto_meta
+  gRPC::grpc++
+)
+
 add_executable(meta_server src/bin/meta_server.cpp)
 target_link_libraries(meta_server PRIVATE nimbus_meta)
+
+add_executable(storage_server src/bin/storage_server.cpp)
+target_link_libraries(storage_server PRIVATE nimbus_storage)
 
 enable_testing()
 
@@ -136,9 +153,11 @@ add_executable(unit_tests
   tests/unit/test_meta_coordinator.cpp
   tests/unit/test_policy.cpp
   tests/unit/test_placement.cpp
+  tests/unit/test_chunk_store.cpp
 )
 target_link_libraries(unit_tests PRIVATE
   nimbus_meta
+  nimbus_storage
   GTest::gtest_main
 )
 target_include_directories(unit_tests PRIVATE src)
