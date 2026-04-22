@@ -201,6 +201,7 @@ else()
   target_link_libraries(unit_tests PRIVATE
     nimbus_meta
     nimbus_storage
+    nimbus_client
     GTest::gtest_main
   )
   target_include_directories(unit_tests PRIVATE src)

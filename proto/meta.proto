@@ -20,7 +20,7 @@ message PutChunkResp {
   bool          ok          = 1;
   string        error       = 2;
   uint64        version     = 3;
-  repeated string replica_set = 4;  // node_ids to write to
+  repeated string replica_set = 4;  // entries formatted as node_id=address
 }
 
 // ── GetChunkInfo ──────────────────────────────────────────────────────────
@@ -34,10 +34,10 @@ message ChunkInfoResp {
 message ChunkMeta {
   string          chunk_id          = 1;
   uint64          version           = 2;
-  repeated string replica_set       = 3;
+  repeated string replica_set       = 3;  // entries formatted as node_id=address
   int32           replication_factor = 4;
   ConfigState     config_state      = 5;
-  repeated string old_replica_set   = 6;
+  repeated string old_replica_set   = 6;  // entries formatted as node_id=address
   uint64          size_bytes        = 7;
 }
 
@@ -64,4 +64,8 @@ message HeartbeatReq {
   float    failure_rate_7d = 6;
   map<string, uint64> chunk_access_counts = 7;
 }
-message HeartbeatResp { bool ok = 1; string leader_hint = 2; }
+message HeartbeatResp {
+  bool ok = 1;
+  string leader_hint = 2;
+  repeated string assigned_chunk_ids = 3;
+}
