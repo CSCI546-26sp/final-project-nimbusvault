@@ -5,6 +5,9 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Option to build only client/workload and skip server-side dependencies (RocksDB)
+option(NIMBUS_BUILD_CLIENT_ONLY "Build only client + workload (skip RocksDB and servers)" OFF)
+
 if(APPLE)
   list(INSERT CMAKE_PREFIX_PATH 0 /opt/homebrew)
 endif()
@@ -28,26 +31,33 @@ FetchContent_Declare(googletest
 set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
-find_package(RocksDB QUIET)
-if(NOT RocksDB_FOUND)
-  if(APPLE)
-    find_library(ROCKSDB_LIB rocksdb PATHS /opt/homebrew/lib NO_DEFAULT_PATH REQUIRED)
-    find_path(ROCKSDB_INCLUDE rocksdb/db.h PATHS /opt/homebrew/include NO_DEFAULT_PATH REQUIRED)
-    find_library(SNAPPY_LIB snappy PATHS /opt/homebrew/lib NO_DEFAULT_PATH)
-  else()
-    find_library(ROCKSDB_LIB rocksdb REQUIRED)
-    find_path(ROCKSDB_INCLUDE rocksdb/db.h REQUIRED)
-    find_library(SNAPPY_LIB snappy)
+if(NOT NIMBUS_BUILD_CLIENT_ONLY)
+  # Try to find RocksDB for server-side components. If not present, we do a best-effort
+  # attempt to locate system libraries but do not fatal-error here so local client-only
+  # builds can proceed.
+  find_package(RocksDB QUIET)
+  if(NOT RocksDB_FOUND)
+    if(APPLE)
+      find_library(ROCKSDB_LIB rocksdb PATHS /opt/homebrew/lib NO_DEFAULT_PATH)
+      find_path(ROCKSDB_INCLUDE rocksdb/db.h PATHS /opt/homebrew/include NO_DEFAULT_PATH)
+      find_library(SNAPPY_LIB snappy PATHS /opt/homebrew/lib NO_DEFAULT_PATH)
+    else()
+      find_library(ROCKSDB_LIB rocksdb)
+      find_path(ROCKSDB_INCLUDE rocksdb/db.h)
+      find_library(SNAPPY_LIB snappy)
+    endif()
+    if(ROCKSDB_LIB)
+      add_library(RocksDB::rocksdb UNKNOWN IMPORTED)
+      set(_rocksdb_links "")
+      if(SNAPPY_LIB)
+        list(APPEND _rocksdb_links "${SNAPPY_LIB}")
+      endif()
+      set_target_properties(RocksDB::rocksdb PROPERTIES
+        IMPORTED_LOCATION "${ROCKSDB_LIB}"
+        INTERFACE_INCLUDE_DIRECTORIES "${ROCKSDB_INCLUDE}"
+        INTERFACE_LINK_LIBRARIES "${_rocksdb_links}")
+    endif()
   endif()
-  add_library(RocksDB::rocksdb UNKNOWN IMPORTED)
-  set(_rocksdb_links "")
-  if(SNAPPY_LIB)
-    list(APPEND _rocksdb_links "${SNAPPY_LIB}")
-  endif()
-  set_target_properties(RocksDB::rocksdb PROPERTIES
-    IMPORTED_LOCATION "${ROCKSDB_LIB}"
-    INTERFACE_INCLUDE_DIRECTORIES "${ROCKSDB_INCLUDE}"
-    INTERFACE_LINK_LIBRARIES "${_rocksdb_links}")
 endif()
 
 find_package(Protobuf CONFIG QUIET)
@@ -105,6 +115,7 @@ add_library(nimbus_common INTERFACE)
 target_include_directories(nimbus_common INTERFACE "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(nimbus_common INTERFACE spdlog::spdlog)
 
+if(NOT NIMBUS_BUILD_CLIENT_ONLY)
 add_library(nimbus_meta STATIC
   src/meta/meta_wal.cpp
   src/meta/meta_coordinator.cpp
@@ -145,22 +156,54 @@ target_link_libraries(meta_server PRIVATE nimbus_meta)
 
 add_executable(storage_server src/bin/storage_server.cpp)
 target_link_libraries(storage_server PRIVATE nimbus_storage)
+endif()
+
+# Client + workload library
+add_library(nimbus_client STATIC
+  src/client/nimbus_client.cpp
+  src/client/history_tracer.cpp
+  src/workload/workload_gen.cpp
+)
+target_include_directories(nimbus_client PUBLIC src)
+target_link_libraries(nimbus_client PUBLIC
+  nimbus_common
+  proto_meta
+  proto_storage
+  gRPC::grpc++
+)
+
+# Workload runner binary
+add_executable(workload_runner src/bin/workload_runner.cpp)
+target_link_libraries(workload_runner PRIVATE nimbus_client)
 
 enable_testing()
 
-add_executable(unit_tests
-  tests/unit/test_meta_wal.cpp
-  tests/unit/test_meta_coordinator.cpp
-  tests/unit/test_policy.cpp
-  tests/unit/test_placement.cpp
-  tests/unit/test_chunk_store.cpp
-)
-target_link_libraries(unit_tests PRIVATE
-  nimbus_meta
-  nimbus_storage
-  GTest::gtest_main
-)
-target_include_directories(unit_tests PRIVATE src)
-
-include(GoogleTest)
-gtest_discover_tests(unit_tests)
+if(NIMBUS_BUILD_CLIENT_ONLY)
+  add_executable(client_unit_tests
+    tests/unit/test_history_tracer.cpp
+  )
+  target_link_libraries(client_unit_tests PRIVATE
+    nimbus_client
+    GTest::gtest_main
+  )
+  target_include_directories(client_unit_tests PRIVATE src)
+  include(GoogleTest)
+  gtest_discover_tests(client_unit_tests)
+else()
+  add_executable(unit_tests
+    tests/unit/test_meta_wal.cpp
+    tests/unit/test_meta_coordinator.cpp
+    tests/unit/test_policy.cpp
+    tests/unit/test_placement.cpp
+    tests/unit/test_chunk_store.cpp
+    tests/unit/test_history_tracer.cpp
+  )
+  target_link_libraries(unit_tests PRIVATE
+    nimbus_meta
+    nimbus_storage
+    GTest::gtest_main
+  )
+  target_include_directories(unit_tests PRIVATE src)
+  include(GoogleTest)
+  gtest_discover_tests(unit_tests)
+endif()
