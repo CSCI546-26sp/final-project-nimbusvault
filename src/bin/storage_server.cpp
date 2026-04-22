@@ -1,6 +1,7 @@
 #include "../common/config.h"
 #include "../common/logger.h"
 #include "../storage/chunk_store.h"
+#include "../storage/replica_repair.h"
 #include "../storage/storage_rpc.h"
 #include "../storage/stats_reporter.h"
 #include <grpcpp/grpcpp.h>
@@ -56,9 +57,10 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, sig_handler);
     std::signal(SIGTERM, sig_handler);
 
-    nimbus::ChunkStore store(cfg.data_dir + "/chunks");
-    nimbus::StorageRpcService svc(store);
     nimbus::StatsReporter reporter(cfg, meta_addr);
+    nimbus::ChunkStore store(cfg.data_dir + "/chunks");
+    nimbus::StorageRpcService svc(store, reporter);
+    nimbus::ReplicaRepair repair(cfg, meta_addr, store, reporter);
 
     grpc::ServerBuilder builder;
     builder.AddListeningPort(cfg.address, grpc::InsecureServerCredentials());
@@ -74,12 +76,21 @@ int main(int argc, char** argv) {
         }
     });
 
+    std::thread repair_thread([&]() {
+        while (g_running.load()) {
+            repair.run_once();
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+        }
+    });
+
     while (g_running.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
     reporter.stop();
+    repair.stop();
     server->Shutdown();
     hb_thread.join();
+    repair_thread.join();
     return 0;
 }

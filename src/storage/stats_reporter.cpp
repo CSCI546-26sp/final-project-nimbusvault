@@ -50,11 +50,26 @@ void StatsReporter::run_once() {
 
     nimbus::meta::HeartbeatResp resp;
     grpc::ClientContext ctx;
-    (void)stub_->NodeHeartbeat(&ctx, req, &resp);
+    grpc::Status status = stub_->NodeHeartbeat(&ctx, req, &resp);
+    if (status.ok()) {
+        std::lock_guard<std::mutex> lk(mu_);
+        assigned_chunk_ids_.assign(resp.assigned_chunk_ids().begin(), resp.assigned_chunk_ids().end());
+        has_assignment_snapshot_ = true;
+    }
 }
 
 void StatsReporter::stop() {
     stopped_.store(true);
+}
+
+std::vector<std::string> StatsReporter::assigned_chunk_ids() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return assigned_chunk_ids_;
+}
+
+bool StatsReporter::has_assignment_snapshot() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return has_assignment_snapshot_;
 }
 
 float StatsReporter::compute_load_fraction() const {
