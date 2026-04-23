@@ -26,7 +26,10 @@ public:
     uint64_t catch_up_from() const;
 
     uint64_t local_committed() const;
+    uint64_t local_last_log_index() const;
+    bool read_entry(uint64_t log_index, WalEntry& out) const;
     uint64_t current_term() const { return current_term_; }
+    MetaWal& wal() const { return wal_; }
 
 private:
     MetaWal&       wal_;

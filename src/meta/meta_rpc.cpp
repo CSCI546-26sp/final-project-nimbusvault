@@ -7,8 +7,10 @@ namespace nimbus {
 
 MetaRpcService::MetaRpcService(MetaCoordinator& coord,
                                 MetaReplication* repl,
-                                const NodeConfig& cfg)
-    : coord_(coord), repl_(repl), cfg_(cfg) {}
+                                const NodeConfig& cfg,
+                                AdaptivePolicy* policy,
+                                ReconfigDriver* reconfig)
+    : coord_(coord), repl_(repl), cfg_(cfg), policy_(policy), reconfig_(reconfig) {}
 
 grpc::Status MetaRpcService::PutChunk(grpc::ServerContext*,
                                        const nimbus::meta::PutChunkReq* req,
@@ -47,7 +49,7 @@ grpc::Status MetaRpcService::PutChunk(grpc::ServerContext*,
 
     resp->set_ok(true);
     resp->set_version(version);
-    for (auto& n : nodes) resp->add_replica_set(n);
+    for (auto& n : nodes) resp->add_replica_set(encode_replica_target(coord_, n));
     return grpc::Status::OK;
 }
 
@@ -69,8 +71,12 @@ grpc::Status MetaRpcService::GetChunkInfo(grpc::ServerContext*,
     m->set_config_state(entry->config_state == ChunkConfigState::STABLE
                         ? nimbus::meta::ConfigState::STABLE
                         : nimbus::meta::ConfigState::TRANSITIONING);
-    for (auto& n : entry->replica_set)     m->add_replica_set(n);
-    for (auto& n : entry->old_replica_set) m->add_old_replica_set(n);
+    for (auto& n : entry->replica_set) {
+        m->add_replica_set(encode_replica_target(coord_, n));
+    }
+    for (auto& n : entry->old_replica_set) {
+        m->add_old_replica_set(encode_replica_target(coord_, n));
+    }
     return grpc::Status::OK;
 }
 
@@ -91,16 +97,42 @@ grpc::Status MetaRpcService::DeleteChunk(grpc::ServerContext*,
 grpc::Status MetaRpcService::AddReplica(grpc::ServerContext*,
                                          const nimbus::meta::ReplicaChangeReq* req,
                                          nimbus::meta::ReplicaChangeResp* resp) {
-    resp->set_ok(true);
-    spdlog::info("AddReplica: chunk={} node={}", req->chunk_id(), req->node_id());
+    if (!repl_ || !reconfig_) {
+        resp->set_ok(false);
+        resp->set_error("NotLeader");
+        return grpc::Status::OK;
+    }
+    const ChunkEntry* entry = coord_.get_chunk(req->chunk_id());
+    if (!entry) {
+        resp->set_ok(false);
+        resp->set_error("chunk not found");
+        return grpc::Status::OK;
+    }
+    int new_rf = static_cast<int>(entry->replica_set.size()) + 1;
+    bool ok = reconfig_->reconfig(req->chunk_id(), new_rf);
+    resp->set_ok(ok);
+    if (!ok) resp->set_error("reconfig failed");
     return grpc::Status::OK;
 }
 
 grpc::Status MetaRpcService::RemoveReplica(grpc::ServerContext*,
                                             const nimbus::meta::ReplicaChangeReq* req,
                                             nimbus::meta::ReplicaChangeResp* resp) {
-    resp->set_ok(true);
-    spdlog::info("RemoveReplica: chunk={} node={}", req->chunk_id(), req->node_id());
+    if (!repl_ || !reconfig_) {
+        resp->set_ok(false);
+        resp->set_error("NotLeader");
+        return grpc::Status::OK;
+    }
+    const ChunkEntry* entry = coord_.get_chunk(req->chunk_id());
+    if (!entry || entry->replica_set.size() <= 1) {
+        resp->set_ok(false);
+        resp->set_error(entry ? "cannot remove last replica" : "chunk not found");
+        return grpc::Status::OK;
+    }
+    int new_rf = static_cast<int>(entry->replica_set.size()) - 1;
+    bool ok = reconfig_->reconfig(req->chunk_id(), new_rf);
+    resp->set_ok(ok);
+    if (!ok) resp->set_error("reconfig failed");
     return grpc::Status::OK;
 }
 
@@ -110,6 +142,28 @@ grpc::Status MetaRpcService::NodeHeartbeat(grpc::ServerContext*,
     coord_.apply_heartbeat(req->node_id(), req->address(),
                            req->load_fraction(), req->free_bytes(),
                            req->total_bytes(), req->failure_rate_7d());
+
+    if (policy_) {
+        const uint64_t window_ms = static_cast<uint64_t>(cfg_.heartbeat_interval_ms);
+        for (const auto& [chunk_id, count] : req->chunk_access_counts()) {
+            policy_->record_accesses(chunk_id, static_cast<uint64_t>(count), window_ms);
+        }
+    }
+
+    // Return the set of chunk IDs assigned to this storage node.
+    auto all_chunks = coord_.get_chunks();
+    for (const auto& c : all_chunks) {
+        for (const auto& replica : c.replica_set) {
+            // replica entries are "node_id=address"; extract node_id
+            const size_t eq = replica.find('=');
+            const std::string rid = (eq != std::string::npos) ? replica.substr(0, eq) : replica;
+            if (rid == req->node_id()) {
+                resp->add_assigned_chunk_ids(c.chunk_id);
+                break;
+            }
+        }
+    }
+
     resp->set_ok(true);
     return grpc::Status::OK;
 }
@@ -171,8 +225,22 @@ grpc::Status MetaReplService::FetchLogEntries(
         grpc::ServerContext*,
         const nimbus::repl::FetchLogReq* req,
         grpc::ServerWriter<nimbus::repl::LogEntry>* writer) {
-    spdlog::info("FetchLogEntries from={}", req->from_index());
-    (void)writer;
+    const uint64_t from = req->from_index();
+    const uint64_t last = repl_ ? repl_->last_log_index() : 0;
+    spdlog::info("FetchLogEntries from={} last={}", from, last);
+
+    for (uint64_t idx = from; idx <= last; ++idx) {
+        nimbus::WalEntry e;
+        if (!follower_.wal().read_entry(idx, e)) break;
+
+        nimbus::repl::LogEntry out;
+        out.set_log_index(e.log_index);
+        out.set_term(e.term);
+        out.set_type(static_cast<nimbus::repl::EntryType>(e.type));
+        out.set_payload(e.payload);
+        if (!writer->Write(out)) break;
+    }
+
     return grpc::Status::OK;
 }
 

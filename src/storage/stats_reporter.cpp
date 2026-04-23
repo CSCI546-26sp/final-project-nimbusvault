@@ -1,5 +1,6 @@
 #include "stats_reporter.h"
 #include <grpcpp/create_channel.h>
+#include <spdlog/spdlog.h>
 #include <thread>
 
 #if defined(__linux__) || defined(__APPLE__)
@@ -52,9 +53,14 @@ void StatsReporter::run_once() {
     grpc::ClientContext ctx;
     grpc::Status status = stub_->NodeHeartbeat(&ctx, req, &resp);
     if (status.ok()) {
+        std::vector<std::string> assigned;
+        assigned.assign(resp.assigned_chunk_ids().begin(), resp.assigned_chunk_ids().end());
+
         std::lock_guard<std::mutex> lk(mu_);
-        assigned_chunk_ids_.assign(resp.assigned_chunk_ids().begin(), resp.assigned_chunk_ids().end());
+        assigned_chunk_ids_ = std::move(assigned);
         has_assignment_snapshot_ = true;
+        spdlog::debug("assigned chunk snapshot: node={} chunks={}",
+                      cfg_.node_id, assigned_chunk_ids_.size());
     }
 }
 

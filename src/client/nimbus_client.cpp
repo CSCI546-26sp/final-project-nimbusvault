@@ -1,8 +1,20 @@
 #include "client/nimbus_client.h"
 #include <grpcpp/create_channel.h>
+#include <chrono>
 #include <iostream>
+#include <thread>
 
 namespace nimbus {
+
+static std::pair<std::string, std::string> parse_replica_entry(const std::string& entry) {
+    auto eq = entry.find('=');
+    if (eq != std::string::npos) {
+        std::string node_id = entry.substr(0, eq);
+        std::string addr = entry.substr(eq + 1);
+        return {node_id, addr};
+    }
+    return {entry, ""};
+}
 
 NimbusClient::NimbusClient(const std::string& meta_addr,
                            const std::map<std::string, std::string>& node_addrs)
@@ -34,7 +46,14 @@ PutResult NimbusClient::put(const std::string& chunk_id,
     bool all_ok = true;
     std::string all_errs;
 
-    for (const auto& node_id : presp.replica_set()) {
+    for (const auto& replica_entry : presp.replica_set()) {
+        auto [node_id, parsed_addr] = parse_replica_entry(replica_entry);
+
+        if (!parsed_addr.empty()) {
+            std::lock_guard<std::mutex> lk(mu_);
+            node_addrs_[node_id] = parsed_addr;
+        }
+
         auto it_addr = node_addrs_.find(node_id);
         if (it_addr == node_addrs_.end()) {
             all_ok = false;
@@ -100,38 +119,53 @@ GetResult NimbusClient::get(const std::string& chunk_id, uint64_t min_version) {
         return GetResult{false, resp.error(), std::string(), 0};
     }
 
-    uint64_t version = resp.meta().version();
-    for (const auto& node_id : resp.meta().replica_set()) {
-        auto it_addr = node_addrs_.find(node_id);
-        if (it_addr == node_addrs_.end()) continue;
-        const std::string addr = it_addr->second;
+    uint64_t target_version = (min_version == 0) ? resp.meta().version() : min_version;
 
-        nimbus::storage::StorageNode::Stub* stub_raw = nullptr;
-        {
-            std::lock_guard<std::mutex> lk(mu_);
-            auto it = storage_stubs_.find(node_id);
-            if (it == storage_stubs_.end()) {
-                auto channel = grpc::CreateChannel(addr, grpc::InsecureChannelCredentials());
-                auto stub = nimbus::storage::StorageNode::NewStub(channel);
-                storage_stubs_[node_id] = std::move(stub);
-                stub_raw = storage_stubs_[node_id].get();
-            } else {
-                stub_raw = it->second.get();
+    constexpr int kAttempts = 60;
+    for (int attempt = 0; attempt < kAttempts; ++attempt) {
+        for (const auto& replica_entry : resp.meta().replica_set()) {
+            auto [node_id, parsed_addr] = parse_replica_entry(replica_entry);
+
+            if (!parsed_addr.empty()) {
+                std::lock_guard<std::mutex> lk(mu_);
+                node_addrs_[node_id] = parsed_addr;
             }
-        }
-        if (!stub_raw) continue;
 
-        nimbus::storage::ReadChunkReq rreq;
-        rreq.set_chunk_id(chunk_id);
-        rreq.set_min_version(min_version == 0 ? version : min_version);
+            auto it_addr = node_addrs_.find(node_id);
+            if (it_addr == node_addrs_.end()) continue;
+            const std::string addr = it_addr->second;
 
-        nimbus::storage::ReadChunkResp rresp;
-        grpc::ClientContext rctx;
-        grpc::Status rst = stub_raw->ReadChunk(&rctx, rreq, &rresp);
-        if (!rst.ok() || !rresp.ok()) {
-            continue; // try next replica
+            nimbus::storage::StorageNode::Stub* stub_raw = nullptr;
+            {
+                std::lock_guard<std::mutex> lk(mu_);
+                auto it = storage_stubs_.find(node_id);
+                if (it == storage_stubs_.end()) {
+                    auto channel = grpc::CreateChannel(addr, grpc::InsecureChannelCredentials());
+                    auto stub = nimbus::storage::StorageNode::NewStub(channel);
+                    storage_stubs_[node_id] = std::move(stub);
+                    stub_raw = storage_stubs_[node_id].get();
+                } else {
+                    stub_raw = it->second.get();
+                }
+            }
+            if (!stub_raw) continue;
+
+            nimbus::storage::ReadChunkReq rreq;
+            rreq.set_chunk_id(chunk_id);
+            rreq.set_min_version(target_version);
+
+            nimbus::storage::ReadChunkResp rresp;
+            grpc::ClientContext rctx;
+            grpc::Status rst = stub_raw->ReadChunk(&rctx, rreq, &rresp);
+            if (!rst.ok() || !rresp.ok()) {
+                continue; // try next replica
+            }
+            return GetResult{true, std::string(), rresp.data(), rresp.version()};
         }
-        return GetResult{true, std::string(), rresp.data(), rresp.version()};
+
+        if (attempt + 1 < kAttempts) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
     }
 
     return GetResult{false, std::string("all replicas failed"), std::string(), 0};

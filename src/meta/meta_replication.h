@@ -42,7 +42,8 @@ public:
     void send_heartbeats();
 
     uint64_t current_term() const { return term_.load(); }
-    bool is_leader() const { return true; }  
+    uint64_t last_log_index() const { return wal_.last_log_index(); }
+    bool is_leader() const { return true; }
 
 private:
     void replicate_to_follower(const std::string& addr, uint64_t log_index,
