@@ -172,7 +172,24 @@ grpc::Status MetaReplService::FetchLogEntries(
         const nimbus::repl::FetchLogReq* req,
         grpc::ServerWriter<nimbus::repl::LogEntry>* writer) {
     spdlog::info("FetchLogEntries from={}", req->from_index());
-    (void)writer;
+
+    const uint64_t from = req->from_index();
+    const uint64_t last = follower_.local_last_log_index();
+
+    for (uint64_t idx = from; idx <= last; ++idx) {
+        WalEntry e;
+        if (!follower_.read_entry(idx, e)) continue;
+
+        nimbus::repl::LogEntry out;
+        out.set_log_index(e.log_index);
+        out.set_term(e.term);
+        out.set_type(static_cast<nimbus::repl::EntryType>(e.type));
+        out.set_payload(e.payload);
+        if (!writer->Write(out)) {
+            break;
+        }
+    }
+
     return grpc::Status::OK;
 }
 

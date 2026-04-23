@@ -3,6 +3,7 @@
 #include <fstream>
 #include <cstring>
 #include <stdexcept>
+#include <vector>
 
 namespace nimbus {
 
@@ -44,7 +45,71 @@ static std::string serialize_node(const NodeEntry& n) {
            std::to_string(n.free_bytes) + ";" +
            std::to_string(n.total_bytes) + ";" +
            std::to_string(n.failure_rate_7d) + ";" +
-           std::to_string(n.last_seen_ms);
+           std::to_string(n.last_seen_ms) + ";" +
+           std::to_string(static_cast<int>(n.alive));
+}
+
+static std::vector<std::string> split(const std::string& s, char delim) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char c : s) {
+        if (c == delim) {
+            out.push_back(cur);
+            cur.clear();
+        } else {
+            cur.push_back(c);
+        }
+    }
+    out.push_back(cur);
+    return out;
+}
+
+static std::vector<std::string> parse_list(const std::string& csv) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char c : csv) {
+        if (c == ',') {
+            if (!cur.empty()) out.push_back(cur);
+            cur.clear();
+        } else {
+            cur.push_back(c);
+        }
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
+static ChunkEntry deserialize_chunk(const std::string& s) {
+    auto p = split(s, ';');
+    if (p.size() < 7) throw std::runtime_error("invalid chunk snapshot entry");
+
+    ChunkEntry e;
+    e.chunk_id = p[0];
+    e.version = static_cast<uint64_t>(std::stoull(p[1]));
+    e.replication_factor = std::stoi(p[2]);
+    e.size_bytes = static_cast<uint64_t>(std::stoull(p[3]));
+    e.config_state = (std::stoi(p[4]) == 0)
+        ? ChunkConfigState::STABLE
+        : ChunkConfigState::TRANSITIONING;
+    e.replica_set = parse_list(p[5]);
+    e.old_replica_set = parse_list(p[6]);
+    return e;
+}
+
+static NodeEntry deserialize_node(const std::string& s) {
+    auto p = split(s, ';');
+    if (p.size() < 8) throw std::runtime_error("invalid node snapshot entry");
+
+    NodeEntry n;
+    n.node_id = p[0];
+    n.address = p[1];
+    n.load_fraction = std::stof(p[2]);
+    n.free_bytes = static_cast<uint64_t>(std::stoull(p[3]));
+    n.total_bytes = static_cast<uint64_t>(std::stoull(p[4]));
+    n.failure_rate_7d = std::stof(p[5]);
+    n.last_seen_ms = static_cast<uint64_t>(std::stoull(p[6]));
+    n.alive = (std::stoi(p[7]) != 0);
+    return n;
 }
 
 MetaSnapshot::MetaSnapshot(MetaCoordinator& coord, MetaWal& wal,
@@ -53,7 +118,7 @@ MetaSnapshot::MetaSnapshot(MetaCoordinator& coord, MetaWal& wal,
 
 std::pair<std::string, uint64_t> MetaSnapshot::take_snapshot() {
     uint64_t lsn      = wal_.committed_index();
-    auto     chunks   = coord_.get_nodes();  
+    auto     chunks   = coord_.get_chunks();
     auto     nodes    = coord_.get_nodes();
 
     std::string buf;
@@ -67,7 +132,12 @@ std::pair<std::string, uint64_t> MetaSnapshot::take_snapshot() {
     buf.append(reinterpret_cast<char*>(&nc_be), 4);
     for (auto& n : nodes) write_lp(buf, serialize_node(n));
 
-    spdlog::info("MetaSnapshot::take_snapshot lsn={} nodes={}", lsn, nodes.size());
+    uint32_t cc_be = __builtin_bswap32(static_cast<uint32_t>(chunks.size()));
+    buf.append(reinterpret_cast<char*>(&cc_be), 4);
+    for (auto& c : chunks) write_lp(buf, serialize_chunk(c));
+
+    spdlog::info("MetaSnapshot::take_snapshot lsn={} nodes={} chunks={}",
+                 lsn, nodes.size(), chunks.size());
     return {buf, lsn};
 }
 
@@ -91,13 +161,30 @@ uint64_t MetaSnapshot::install_snapshot(const std::string& snapshot_data) {
     std::memcpy(&nc_be, buf + off, 4); off += 4;
     uint32_t node_count = __builtin_bswap32(nc_be);
 
+    std::vector<NodeEntry> nodes;
+    nodes.reserve(node_count);
     for (uint32_t i = 0; i < node_count; ++i) {
         std::string entry = read_lp(buf, len, off);
-        spdlog::debug("MetaSnapshot: restoring node entry ({}B)", entry.size());
-        (void)entry;
+        nodes.push_back(deserialize_node(entry));
     }
 
-    spdlog::info("MetaSnapshot::install_snapshot lsn={} nodes={}", lsn, node_count);
+    if (off + 4 > len) throw std::runtime_error("snapshot truncated (chunk_count)");
+    uint32_t cc_be;
+    std::memcpy(&cc_be, buf + off, 4);
+    off += 4;
+    uint32_t chunk_count = __builtin_bswap32(cc_be);
+
+    std::vector<ChunkEntry> chunks;
+    chunks.reserve(chunk_count);
+    for (uint32_t i = 0; i < chunk_count; ++i) {
+        std::string entry = read_lp(buf, len, off);
+        chunks.push_back(deserialize_chunk(entry));
+    }
+
+    coord_.apply_snapshot_state(nodes, chunks);
+
+    spdlog::info("MetaSnapshot::install_snapshot lsn={} nodes={} chunks={}",
+                 lsn, node_count, chunk_count);
     return lsn;
 }
 

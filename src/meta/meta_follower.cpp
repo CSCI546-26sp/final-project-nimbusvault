@@ -58,4 +58,12 @@ uint64_t MetaFollower::local_committed() const {
     return wal_.committed_index();
 }
 
+uint64_t MetaFollower::local_last_log_index() const {
+    return wal_.last_log_index();
+}
+
+bool MetaFollower::read_entry(uint64_t log_index, WalEntry& out) const {
+    return wal_.read_entry(log_index, out);
+}
+
 } // namespace nimbus
