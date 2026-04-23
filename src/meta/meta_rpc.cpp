@@ -7,8 +7,18 @@ namespace nimbus {
 
 MetaRpcService::MetaRpcService(MetaCoordinator& coord,
                                 MetaReplication* repl,
-                                const NodeConfig& cfg)
-    : coord_(coord), repl_(repl), cfg_(cfg) {}
+                                const NodeConfig& cfg,
+                                AdaptivePolicy* policy,
+                                ReconfigDriver* reconfig)
+    : coord_(coord), repl_(repl), cfg_(cfg), policy_(policy), reconfig_(reconfig) {}
+
+static std::string encode_replica_target(const MetaCoordinator& coord,
+                                          const std::string& node_id) {
+    if (const NodeEntry* n = coord.get_node(node_id)) {
+        if (!n->address.empty()) return node_id + "=" + n->address;
+    }
+    return node_id;
+}
 
 grpc::Status MetaRpcService::PutChunk(grpc::ServerContext*,
                                        const nimbus::meta::PutChunkReq* req,
@@ -47,7 +57,7 @@ grpc::Status MetaRpcService::PutChunk(grpc::ServerContext*,
 
     resp->set_ok(true);
     resp->set_version(version);
-    for (auto& n : nodes) resp->add_replica_set(n);
+    for (auto& n : nodes) resp->add_replica_set(encode_replica_target(coord_, n));
     return grpc::Status::OK;
 }
 
@@ -69,8 +79,12 @@ grpc::Status MetaRpcService::GetChunkInfo(grpc::ServerContext*,
     m->set_config_state(entry->config_state == ChunkConfigState::STABLE
                         ? nimbus::meta::ConfigState::STABLE
                         : nimbus::meta::ConfigState::TRANSITIONING);
-    for (auto& n : entry->replica_set)     m->add_replica_set(n);
-    for (auto& n : entry->old_replica_set) m->add_old_replica_set(n);
+    for (auto& n : entry->replica_set) {
+        m->add_replica_set(encode_replica_target(coord_, n));
+    }
+    for (auto& n : entry->old_replica_set) {
+        m->add_old_replica_set(encode_replica_target(coord_, n));
+    }
     return grpc::Status::OK;
 }
 
@@ -110,6 +124,47 @@ grpc::Status MetaRpcService::NodeHeartbeat(grpc::ServerContext*,
     coord_.apply_heartbeat(req->node_id(), req->address(),
                            req->load_fraction(), req->free_bytes(),
                            req->total_bytes(), req->failure_rate_7d());
+
+    const std::vector<ChunkEntry> chunks = coord_.get_chunks();
+    for (const auto& c : chunks) {
+        for (const auto& node_id : c.replica_set) {
+            if (node_id == req->node_id()) {
+                resp->add_assigned_chunk_ids(c.chunk_id);
+                break;
+            }
+        }
+    }
+
+    if (repl_ && policy_ && reconfig_ && cfg_.mode == "adaptive") {
+        for (const auto& kv : req->chunk_access_counts()) {
+            const std::string& chunk_id = kv.first;
+            const uint64_t accesses = kv.second;
+
+            policy_->record_accesses(chunk_id, accesses, cfg_.stats_interval_ms);
+            PolicyDecision decision = policy_->evaluate(chunk_id);
+
+            if (!decision.changed) {
+                continue;
+            }
+
+            const ChunkEntry* current = coord_.get_chunk(chunk_id);
+            if (!current) {
+                continue;
+            }
+            if (decision.new_rf == current->replication_factor) {
+                continue;
+            }
+
+            spdlog::info("policy: chunk={} tier-change rf {} -> {}",
+                         chunk_id, current->replication_factor, decision.new_rf);
+            if (reconfig_->reconfig(chunk_id, decision.new_rf)) {
+                spdlog::info("RECONFIG: chunk={} rf={} applied", chunk_id, decision.new_rf);
+            } else {
+                spdlog::warn("RECONFIG: chunk={} rf={} failed", chunk_id, decision.new_rf);
+            }
+        }
+    }
+
     resp->set_ok(true);
     return grpc::Status::OK;
 }

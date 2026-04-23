@@ -30,6 +30,7 @@ void AdaptivePolicy::record_accesses(const std::string& chunk_id,
 PolicyDecision AdaptivePolicy::evaluate(const std::string& chunk_id) {
     std::lock_guard<std::mutex> lk(mu_);
     auto& s = state_[chunk_id];
+    ChunkTier old_tier = s.tier;
 
     // Drive transition hysteresis using the latest window classification.
     // EWMA is still tracked for metrics/observability via get_rate().
@@ -58,8 +59,8 @@ PolicyDecision AdaptivePolicy::evaluate(const std::string& chunk_id) {
     }
 
     if (changed) {
-        spdlog::info("Policy: chunk {} tier changed → {} (rate={:.3f})",
-                     chunk_id, rf_for_tier(s.tier), s.ewma_rate);
+        spdlog::info("policy: chunk={} tier-change rf {} -> {} (rate={:.3f})",
+                     chunk_id, rf_for_tier(old_tier), rf_for_tier(s.tier), s.ewma_rate);
     }
 
     return PolicyDecision{chunk_id, rf_for_tier(desired_tier), desired_tier, changed};

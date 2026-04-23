@@ -19,6 +19,7 @@
 #include <csignal>
 #include <atomic>
 #include <vector>
+#include <memory>
 
 static std::atomic<bool> g_running{true};
 
@@ -135,6 +136,9 @@ int main(int argc, char** argv) {
     nimbus::MetaWal         wal(cfg.data_dir);
     nimbus::MetaCoordinator coord(cfg);
     nimbus::MetaSnapshot    snapshot(coord, wal, cfg.data_dir);
+    std::unique_ptr<nimbus::Placement> placement;
+    std::unique_ptr<nimbus::AdaptivePolicy> policy;
+    std::unique_ptr<nimbus::ReconfigDriver> reconfig_driver;
 
     // Replay WAL on startup.
     wal.replay([&](const nimbus::WalEntry& e) {
@@ -154,6 +158,13 @@ int main(int argc, char** argv) {
             apply_wal_entry(coord, e);
         });
         for (auto& peer : cfg.peers) repl->add_follower(peer);
+
+        nimbus::PlacementConfig placement_cfg;
+        nimbus::PolicyConfig policy_cfg;
+        placement = std::make_unique<nimbus::Placement>(placement_cfg);
+        policy = std::make_unique<nimbus::AdaptivePolicy>(policy_cfg);
+        reconfig_driver = std::make_unique<nimbus::ReconfigDriver>(coord, *repl, *placement);
+
         spdlog::info("Leader ready with {} followers", cfg.peers.size());
     } else {
         follower = new nimbus::MetaFollower(wal, cfg, [&](uint64_t idx) {
@@ -168,7 +179,7 @@ int main(int argc, char** argv) {
     }
 
     // ── gRPC servers ──────────────────────────────────────────────────────
-    nimbus::MetaRpcService  client_svc(coord, repl, cfg);
+    nimbus::MetaRpcService  client_svc(coord, repl, cfg, policy.get(), reconfig_driver.get());
 
     // Reuse a dummy follower on leader for the repl service (leader also handles
     // FetchLogEntries for catch-up). On leader, follower ptr is null — we create

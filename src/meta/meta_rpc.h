@@ -3,6 +3,8 @@
 #include "meta_replication.h"
 #include "meta_follower.h"
 #include "meta_snapshot.h"
+#include "policy.h"
+#include "reconfig_driver.h"
 #include "meta.grpc.pb.h"
 #include "meta_repl.grpc.pb.h"
 #include <grpcpp/grpcpp.h>
@@ -14,7 +16,9 @@ class MetaRpcService final : public nimbus::meta::MetaCoordinator::Service {
 public:
     MetaRpcService(MetaCoordinator& coord,
                    MetaReplication* repl,  
-                   const NodeConfig& cfg);
+                   const NodeConfig& cfg,
+                   AdaptivePolicy* policy = nullptr,
+                   ReconfigDriver* reconfig = nullptr);
 
     grpc::Status PutChunk(grpc::ServerContext* ctx,
                           const nimbus::meta::PutChunkReq* req,
@@ -44,6 +48,8 @@ private:
     MetaCoordinator& coord_;
     MetaReplication* repl_;   
     NodeConfig       cfg_;
+    AdaptivePolicy*  policy_;
+    ReconfigDriver*  reconfig_;
 };
 class MetaReplService final : public nimbus::repl::MetaReplication::Service {
 public:

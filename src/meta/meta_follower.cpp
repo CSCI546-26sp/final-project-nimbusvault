@@ -18,15 +18,36 @@ bool MetaFollower::handle_append(uint64_t leader_term,
     }
     current_term_ = leader_term;
 
-    if (prev_log_index > 0 && prev_log_index != wal_.last_log_index()) {
+    const uint64_t local_last = wal_.last_log_index();
+
+    if (log_index <= local_last) {
+        WalEntry existing;
+        if (!wal_.read_entry(log_index, existing)) {
+            // Under concurrent AppendEntry handlers, local_last can advance before
+            // the corresponding entry is visible to this thread; treat as idempotent.
+            spdlog::debug("MetaFollower: duplicate idx={} observed during append race", log_index);
+            return true;
+        }
+        if (existing.term != term || existing.type != type || existing.payload != payload) {
+            spdlog::warn("MetaFollower: conflicting entry at idx={} (local term/type/payload mismatch)",
+                         log_index);
+            return false;
+        }
+        spdlog::debug("MetaFollower: duplicate/old AppendEntry idx={} ignored (local_last={})",
+                      log_index, local_last);
+        return true;
+    }
+
+    if (log_index > local_last + 1) {
         spdlog::warn("MetaFollower: log gap detected: prev={} local_last={}",
-                     prev_log_index, wal_.last_log_index());
+                     prev_log_index, local_last);
         return false;
     }
 
-    if (log_index <= wal_.last_log_index()) {
-        spdlog::debug("MetaFollower: duplicate AppendEntry idx={} ignored", log_index);
-        return true;
+    if (prev_log_index != local_last) {
+        spdlog::warn("MetaFollower: prev index mismatch: prev={} local_last={} idx={}",
+                     prev_log_index, local_last, log_index);
+        return false;
     }
 
     wal_.append(type, term, payload);

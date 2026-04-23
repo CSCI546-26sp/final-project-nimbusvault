@@ -75,6 +75,12 @@ const ChunkEntry* MetaCoordinator::get_chunk(const std::string& chunk_id) const 
     return (it != chunk_table_.end()) ? &it->second : nullptr;
 }
 
+const NodeEntry* MetaCoordinator::get_node(const std::string& node_id) const {
+    std::lock_guard<std::mutex> lk(mu_);
+    auto it = node_table_.find(node_id);
+    return (it != node_table_.end()) ? &it->second : nullptr;
+}
+
 std::vector<ChunkEntry> MetaCoordinator::get_chunks() const {
     std::lock_guard<std::mutex> lk(mu_);
     std::vector<ChunkEntry> out;
