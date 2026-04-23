@@ -1,6 +1,7 @@
 #include "replica_repair.h"
 
 #include <grpcpp/create_channel.h>
+#include <spdlog/spdlog.h>
 
 #include <unordered_set>
 
@@ -20,6 +21,13 @@ void ReplicaRepair::run_once() {
     if (!reporter_.has_assignment_snapshot()) return;
 
     const std::vector<std::string> assigned_ids = reporter_.assigned_chunk_ids();
+    if (assigned_ids.empty()) {
+        spdlog::debug("repair: node={} assigned=0; skipping", cfg_.node_id);
+        return;
+    }
+
+    spdlog::debug("repair: node={} assigned_chunks={}", cfg_.node_id, assigned_ids.size());
+
     std::unordered_set<std::string> assigned_set(assigned_ids.begin(), assigned_ids.end());
 
     for (const auto& chunk_id : assigned_set) {
@@ -54,6 +62,7 @@ void ReplicaRepair::run_once() {
 
         if (repaired) {
             store_.write(chunk_id, repaired_version, repaired_data);
+            spdlog::info("repair: chunk={} synced version={}", chunk_id, repaired_version);
         }
     }
 
@@ -61,6 +70,7 @@ void ReplicaRepair::run_once() {
     for (const auto& chunk_id : local_chunks) {
         if (assigned_set.find(chunk_id) == assigned_set.end()) {
             store_.remove(chunk_id);
+            spdlog::info("repair: chunk={} removed (unassigned)", chunk_id);
         }
     }
 }

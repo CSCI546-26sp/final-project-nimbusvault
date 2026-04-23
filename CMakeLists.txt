@@ -194,6 +194,7 @@ else()
   add_executable(unit_tests
     tests/unit/test_meta_wal.cpp
     tests/unit/test_meta_coordinator.cpp
+    tests/unit/test_meta_integration.cpp
     tests/unit/test_policy.cpp
     tests/unit/test_placement.cpp
     tests/unit/test_chunk_store.cpp

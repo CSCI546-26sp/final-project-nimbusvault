@@ -31,13 +31,16 @@ WriteResult MetaReplication::write(WalEntryType type, const std::string& payload
     uint64_t idx  = wal_.append(type, term, payload);
 
     int total_followers = 0;
+    std::vector<std::string> followers;
     {
         std::lock_guard<std::mutex> lk(mu_);
         total_followers = static_cast<int>(followers_.size());
         ack_counts_[idx] = 0;
+        followers.reserve(followers_.size());
+        for (const auto& [addr, _] : followers_) followers.push_back(addr);
     }
 
-    for (auto& [addr, _] : followers_) {
+    for (const auto& addr : followers) {
         std::thread([this, addr = addr, idx, type, term, payload]() {
             replicate_to_follower(addr, idx, type, term, payload);
         }).detach();
@@ -66,20 +69,36 @@ WriteResult MetaReplication::write(WalEntryType type, const std::string& payload
 
 void MetaReplication::record_ack(const std::string& follower_addr, uint64_t log_index) {
     std::lock_guard<std::mutex> lk(mu_);
-    ack_counts_[log_index]++;
+    auto ac = ack_counts_.find(log_index);
+    if (ac != ack_counts_.end()) {
+        ac->second++;
+    }
     auto it = followers_.find(follower_addr);
     if (it != followers_.end()) {
+        bool was_lagging = (it->second.status == FollowerStatus::LAGGING);
         it->second.match_index = std::max(it->second.match_index, log_index);
+        it->second.next_index = std::max(it->second.next_index, log_index + 1);
         it->second.last_ack_ms = now_ms();
         it->second.missed_pings = 0;
         it->second.status = FollowerStatus::HEALTHY;
+        if (was_lagging) {
+            spdlog::info("MetaReplication: follower {} recovered at idx={}",
+                         follower_addr, it->second.match_index);
+        }
     }
 }
 
 void MetaReplication::send_heartbeats() {
     uint64_t t = now_ms();
+    uint64_t leader_last = wal_.last_log_index();
     std::lock_guard<std::mutex> lk(mu_);
     for (auto& [addr, fs] : followers_) {
+        if (fs.match_index >= leader_last) {
+            fs.missed_pings = 0;
+            fs.status = FollowerStatus::HEALTHY;
+            continue;
+        }
+
         uint64_t elapsed = t - fs.last_ack_ms;
         if (elapsed > cfg_.heartbeat_interval_ms * 3) {
             fs.missed_pings++;
@@ -97,6 +116,9 @@ void MetaReplication::replicate_to_follower(const std::string& addr,
                                              WalEntryType type,
                                              uint64_t term,
                                              const std::string& payload) {
+    (void)type;
+    (void)payload;
+
     auto channel = grpc::CreateChannel(addr, grpc::InsecureChannelCredentials());
     auto stub    = nimbus::repl::MetaReplication::NewStub(channel);
 

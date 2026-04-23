@@ -49,7 +49,7 @@ grpc::Status MetaRpcService::PutChunk(grpc::ServerContext*,
 
     resp->set_ok(true);
     resp->set_version(version);
-    for (auto& n : nodes) resp->add_replica_set(n);
+    for (auto& n : nodes) resp->add_replica_set(encode_replica_target(coord_, n));
     return grpc::Status::OK;
 }
 
@@ -71,8 +71,12 @@ grpc::Status MetaRpcService::GetChunkInfo(grpc::ServerContext*,
     m->set_config_state(entry->config_state == ChunkConfigState::STABLE
                         ? nimbus::meta::ConfigState::STABLE
                         : nimbus::meta::ConfigState::TRANSITIONING);
-    for (auto& n : entry->replica_set)     m->add_replica_set(n);
-    for (auto& n : entry->old_replica_set) m->add_old_replica_set(n);
+    for (auto& n : entry->replica_set) {
+        m->add_replica_set(encode_replica_target(coord_, n));
+    }
+    for (auto& n : entry->old_replica_set) {
+        m->add_old_replica_set(encode_replica_target(coord_, n));
+    }
     return grpc::Status::OK;
 }
 
