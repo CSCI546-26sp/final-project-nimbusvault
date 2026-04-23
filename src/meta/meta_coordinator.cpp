@@ -67,12 +67,21 @@ void MetaCoordinator::apply_heartbeat(const std::string& node_id,
     n.failure_rate_7d = fail_rate;
     n.last_seen_ms    = unix_ms();
     n.alive           = true;
+    spdlog::debug("coordinator: applied heartbeat from {} {}", node_id, address);
 }
 
 const ChunkEntry* MetaCoordinator::get_chunk(const std::string& chunk_id) const {
     std::lock_guard<std::mutex> lk(mu_);
     auto it = chunk_table_.find(chunk_id);
     return (it != chunk_table_.end()) ? &it->second : nullptr;
+}
+
+std::vector<ChunkEntry> MetaCoordinator::get_chunks() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::vector<ChunkEntry> out;
+    out.reserve(chunk_table_.size());
+    for (auto& [_, c] : chunk_table_) out.push_back(c);
+    return out;
 }
 
 std::vector<NodeEntry> MetaCoordinator::get_nodes() const {
@@ -90,6 +99,15 @@ std::vector<NodeEntry> MetaCoordinator::get_alive_nodes() const {
         if (n.alive) out.push_back(n);
     }
     return out;
+}
+
+void MetaCoordinator::restore_snapshot(const std::vector<NodeEntry>& nodes,
+                                        const std::vector<ChunkEntry>& chunks) {
+    std::lock_guard<std::mutex> lk(mu_);
+    node_table_.clear();
+    for (auto& n : nodes) node_table_[n.node_id] = n;
+    chunk_table_.clear();
+    for (auto& c : chunks) chunk_table_[c.chunk_id] = c;
 }
 
 void MetaCoordinator::evict_stale_nodes(uint64_t now_ms_val, uint64_t timeout_ms) {

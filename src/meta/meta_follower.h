@@ -27,6 +27,7 @@ public:
 
     uint64_t local_committed() const;
     uint64_t current_term() const { return current_term_; }
+    MetaWal& wal() const { return wal_; }
 
 private:
     MetaWal&       wal_;

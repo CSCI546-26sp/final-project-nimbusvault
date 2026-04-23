@@ -9,7 +9,7 @@ static nimbus::PolicyConfig make_cfg() {
     cfg.cold_rf         = 2;
     cfg.warm_rf         = 3;
     cfg.hot_rf          = 5;
-    cfg.ewma_half_life_s = 60.0;
+    cfg.ewma_half_life_s = 1.0;
     cfg.promote_windows  = 2;
     cfg.demote_windows   = 3;
     return cfg;

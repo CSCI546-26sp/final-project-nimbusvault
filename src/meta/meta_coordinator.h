@@ -55,8 +55,12 @@ public:
                          uint64_t total_bytes, float fail_rate);
 
     const ChunkEntry* get_chunk(const std::string& chunk_id) const;
+    std::vector<ChunkEntry> get_chunks() const;
     std::vector<NodeEntry> get_nodes() const;
     std::vector<NodeEntry> get_alive_nodes() const;
+
+    void restore_snapshot(const std::vector<NodeEntry>& nodes,
+                          const std::vector<ChunkEntry>& chunks);
 
     void evict_stale_nodes(uint64_t now_ms, uint64_t timeout_ms = 3000);
 

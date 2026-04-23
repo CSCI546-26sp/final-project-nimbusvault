@@ -130,6 +130,55 @@ void MetaReplication::replicate_to_follower(const std::string& addr,
     } else {
         spdlog::warn("MetaReplication: AppendEntry to {} failed: {}", addr,
                      status.ok() ? resp.error() : status.error_message());
+
+        // Follower rejected due to log gap — replay all missing entries.
+        uint64_t follower_match = 0;
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            auto it = followers_.find(addr);
+            if (it != followers_.end()) follower_match = it->second.match_index;
+        }
+        uint64_t catch_up_from = follower_match + 1;
+        spdlog::info("MetaReplication: catch-up {} from idx={} to idx={}",
+                     addr, catch_up_from, log_index);
+
+        for (uint64_t idx = catch_up_from; idx <= log_index; ++idx) {
+            nimbus::WalEntry e;
+            if (!wal_.read_entry(idx, e)) {
+                spdlog::warn("MetaReplication: catch-up missing WAL entry idx={}", idx);
+                break;
+            }
+
+            nimbus::repl::AppendEntryReq cu_req;
+            cu_req.set_leader_term(e.term);
+            cu_req.set_prev_log_index(idx - 1);
+            cu_req.set_prev_log_term(e.term);
+            cu_req.set_leader_committed_lsn(wal_.committed_index());
+            auto* ce = cu_req.mutable_entry();
+            ce->set_log_index(idx);
+            ce->set_term(e.term);
+            ce->set_type(static_cast<nimbus::repl::EntryType>(e.type));
+            ce->set_payload(e.payload);
+
+            nimbus::repl::AppendEntryResp cu_resp;
+            grpc::ClientContext cu_ctx;
+            cu_ctx.set_deadline(std::chrono::system_clock::now() +
+                                std::chrono::milliseconds(cfg_.quorum_timeout_ms));
+            auto cu_status = stub->AppendEntry(&cu_ctx, cu_req, &cu_resp);
+            if (!cu_status.ok() || !cu_resp.success()) {
+                spdlog::warn("MetaReplication: catch-up AppendEntry idx={} to {} failed",
+                             idx, addr);
+                break;
+            }
+            record_ack(addr, idx);
+
+            nimbus::repl::CommitReq cr;
+            cr.set_log_index(idx);
+            cr.set_term(e.term);
+            nimbus::repl::CommitResp cresp;
+            grpc::ClientContext ctx3;
+            stub->CommitEntry(&ctx3, cr, &cresp);
+        }
     }
 }
 

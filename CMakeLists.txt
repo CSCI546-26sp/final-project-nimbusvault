@@ -198,6 +198,7 @@ else()
     tests/unit/test_placement.cpp
     tests/unit/test_chunk_store.cpp
     tests/unit/test_history_tracer.cpp
+    tests/unit/test_meta_integration.cpp
   )
   target_link_libraries(unit_tests PRIVATE
     nimbus_meta

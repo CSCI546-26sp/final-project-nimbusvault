@@ -16,6 +16,7 @@ inline void init_logger(const std::string& name, const std::string& log_file = "
     auto logger = std::make_shared<spdlog::logger>(name, sinks.begin(), sinks.end());
     spdlog::set_default_logger(logger);
     spdlog::set_level(spdlog::level::debug);
+    spdlog::flush_on(spdlog::level::debug);
     spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%n] [%^%l%$] %v");
 }
 
