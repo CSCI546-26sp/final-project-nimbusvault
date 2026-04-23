@@ -178,8 +178,21 @@ int main(int argc, char** argv) {
         spdlog::info("Follower ready, leader at {}", cfg.peers.empty() ? "?" : cfg.peers[0]);
     }
 
+    // ── Policy engine (leader only) ───────────────────────────────────────
+    nimbus::AdaptivePolicy*  policy_ptr  = nullptr;
+    nimbus::ReconfigDriver*  reconfig_ptr = nullptr;
+    nimbus::Placement*       placement_ptr = nullptr;
+
+    if (cfg.role == "leader" && cfg.mode == "adaptive") {
+        nimbus::PlacementConfig pcfg;
+        placement_ptr = new nimbus::Placement(pcfg);
+        nimbus::PolicyConfig policy_cfg;  // defaults: cold_rf=2 warm_rf=3 hot_rf=5
+        policy_ptr    = new nimbus::AdaptivePolicy(policy_cfg);
+        reconfig_ptr  = new nimbus::ReconfigDriver(coord, *repl, *placement_ptr);
+    }
+
     // ── gRPC servers ──────────────────────────────────────────────────────
-    nimbus::MetaRpcService  client_svc(coord, repl, cfg, policy.get(), reconfig_driver.get());
+    nimbus::MetaRpcService  client_svc(coord, repl, cfg, policy_ptr, reconfig_ptr);
 
     // Reuse a dummy follower on leader for the repl service (leader also handles
     // FetchLogEntries for catch-up). On leader, follower ptr is null — we create
@@ -197,13 +210,28 @@ int main(int argc, char** argv) {
     auto server = builder.BuildAndStart();
     spdlog::info("gRPC server listening on {}", cfg.address);
 
-    // ── Background: heartbeat timer + stale node eviction ─────────────────
+    // ── Background: heartbeat timer + stale node eviction + policy eval ──
     std::thread hb_thread([&]() {
+        uint32_t policy_tick = 0;
+        const uint32_t policy_every = 5;  // evaluate policy every 5 heartbeat intervals
         while (g_running) {
             std::this_thread::sleep_for(
                 std::chrono::milliseconds(cfg.heartbeat_interval_ms));
             if (repl) repl->send_heartbeats();
             coord.evict_stale_nodes(nimbus::unix_ms(), cfg.follower_timeout_ms * 5);
+
+            if (policy_ptr && reconfig_ptr && ++policy_tick >= policy_every) {
+                policy_tick = 0;
+                auto chunks = coord.get_chunks();
+                for (const auto& c : chunks) {
+                    auto dec = policy_ptr->evaluate(c.chunk_id);
+                    if (dec.changed && dec.new_rf != c.replication_factor) {
+                        spdlog::info("policy: chunk={} tier-change rf {} → {}",
+                                     c.chunk_id, c.replication_factor, dec.new_rf);
+                        reconfig_ptr->reconfig(c.chunk_id, dec.new_rf);
+                    }
+                }
+            }
         }
     });
 
@@ -216,6 +244,9 @@ int main(int argc, char** argv) {
     server->Shutdown();
     hb_thread.join();
 
+    delete reconfig_ptr;
+    delete policy_ptr;
+    delete placement_ptr;
     delete repl;
     delete follower;
     return 0;

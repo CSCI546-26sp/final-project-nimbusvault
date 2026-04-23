@@ -15,7 +15,7 @@ namespace nimbus {
 class MetaRpcService final : public nimbus::meta::MetaCoordinator::Service {
 public:
     MetaRpcService(MetaCoordinator& coord,
-                   MetaReplication* repl,  
+                   MetaReplication* repl,
                    const NodeConfig& cfg,
                    AdaptivePolicy* policy = nullptr,
                    ReconfigDriver* reconfig = nullptr);
@@ -46,7 +46,7 @@ public:
 
 private:
     MetaCoordinator& coord_;
-    MetaReplication* repl_;   
+    MetaReplication* repl_;
     NodeConfig       cfg_;
     AdaptivePolicy*  policy_;
     ReconfigDriver*  reconfig_;

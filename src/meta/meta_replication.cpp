@@ -122,80 +122,84 @@ void MetaReplication::replicate_to_follower(const std::string& addr,
     auto channel = grpc::CreateChannel(addr, grpc::InsecureChannelCredentials());
     auto stub    = nimbus::repl::MetaReplication::NewStub(channel);
 
-    uint64_t next_idx = 1;
-    {
-        std::lock_guard<std::mutex> lk(mu_);
-        auto it = followers_.find(addr);
-        if (it == followers_.end()) return;
-        next_idx = std::min(it->second.next_index, log_index);
-    }
+    nimbus::repl::AppendEntryReq req;
+    req.set_leader_term(term);
+    req.set_prev_log_index(log_index - 1);
+    req.set_prev_log_term(term);
+    req.set_leader_committed_lsn(wal_.committed_index());
 
-    if (next_idx < log_index) {
-        spdlog::info("MetaReplication: catch-up {} from idx={} to idx={}",
-                     addr, next_idx, log_index);
-    }
+    auto* entry = req.mutable_entry();
+    entry->set_log_index(log_index);
+    entry->set_term(term);
+    entry->set_type(static_cast<nimbus::repl::EntryType>(type));
+    entry->set_payload(payload);
 
-    while (next_idx <= log_index) {
-        WalEntry e;
-        if (!wal_.read_entry(next_idx, e)) {
-            spdlog::warn("MetaReplication: missing WAL entry idx={} for follower {}",
-                         next_idx, addr);
-            return;
-        }
+    nimbus::repl::AppendEntryResp resp;
+    grpc::ClientContext ctx;
+    ctx.set_deadline(std::chrono::system_clock::now() +
+                     std::chrono::milliseconds(cfg_.quorum_timeout_ms));
 
-        nimbus::repl::AppendEntryReq req;
-        req.set_leader_term(term);
-        req.set_prev_log_index(next_idx > 0 ? next_idx - 1 : 0);
-        req.set_prev_log_term(term);
-        req.set_leader_committed_lsn(wal_.committed_index());
+    auto status = stub->AppendEntry(&ctx, req, &resp);
+    if (status.ok() && resp.success()) {
+        record_ack(addr, log_index);
 
-        auto* entry = req.mutable_entry();
-        entry->set_log_index(e.log_index);
-        entry->set_term(e.term);
-        entry->set_type(static_cast<nimbus::repl::EntryType>(e.type));
-        entry->set_payload(e.payload);
+        nimbus::repl::CommitReq cr;
+        cr.set_log_index(log_index);
+        cr.set_term(term);
+        nimbus::repl::CommitResp cresp;
+        grpc::ClientContext ctx2;
+        stub->CommitEntry(&ctx2, cr, &cresp);
+    } else {
+        spdlog::warn("MetaReplication: AppendEntry to {} failed: {}", addr,
+                     status.ok() ? resp.error() : status.error_message());
 
-        nimbus::repl::AppendEntryResp resp;
-        grpc::ClientContext ctx;
-        ctx.set_deadline(std::chrono::system_clock::now() +
-                         std::chrono::milliseconds(cfg_.quorum_timeout_ms));
-
-        auto status = stub->AppendEntry(&ctx, req, &resp);
-        if (status.ok() && resp.success()) {
-            record_ack(addr, next_idx);
-
-            nimbus::repl::CommitReq cr;
-            cr.set_log_index(next_idx);
-            cr.set_term(term);
-            nimbus::repl::CommitResp cresp;
-            grpc::ClientContext ctx2;
-            stub->CommitEntry(&ctx2, cr, &cresp);
-
-            next_idx++;
-            continue;
-        }
-
-        if (!status.ok()) {
-            spdlog::warn("MetaReplication: AppendEntry to {} failed: {}", addr,
-                         status.error_message());
-            return;
-        }
-
-        if (next_idx <= 1) {
-            spdlog::warn("MetaReplication: follower {} rejected idx=1 append ({})",
-                         addr, resp.error());
-            return;
-        }
-
+        // Follower rejected due to log gap — replay all missing entries.
+        uint64_t follower_match = 0;
         {
             std::lock_guard<std::mutex> lk(mu_);
             auto it = followers_.find(addr);
-            if (it != followers_.end()) {
-                if (it->second.next_index > 1) it->second.next_index--;
-                next_idx = it->second.next_index;
-            } else {
-                next_idx--;
+            if (it != followers_.end()) follower_match = it->second.match_index;
+        }
+        uint64_t catch_up_from = follower_match + 1;
+        spdlog::info("MetaReplication: catch-up {} from idx={} to idx={}",
+                     addr, catch_up_from, log_index);
+
+        for (uint64_t idx = catch_up_from; idx <= log_index; ++idx) {
+            nimbus::WalEntry e;
+            if (!wal_.read_entry(idx, e)) {
+                spdlog::warn("MetaReplication: catch-up missing WAL entry idx={}", idx);
+                break;
             }
+
+            nimbus::repl::AppendEntryReq cu_req;
+            cu_req.set_leader_term(e.term);
+            cu_req.set_prev_log_index(idx - 1);
+            cu_req.set_prev_log_term(e.term);
+            cu_req.set_leader_committed_lsn(wal_.committed_index());
+            auto* ce = cu_req.mutable_entry();
+            ce->set_log_index(idx);
+            ce->set_term(e.term);
+            ce->set_type(static_cast<nimbus::repl::EntryType>(e.type));
+            ce->set_payload(e.payload);
+
+            nimbus::repl::AppendEntryResp cu_resp;
+            grpc::ClientContext cu_ctx;
+            cu_ctx.set_deadline(std::chrono::system_clock::now() +
+                                std::chrono::milliseconds(cfg_.quorum_timeout_ms));
+            auto cu_status = stub->AppendEntry(&cu_ctx, cu_req, &cu_resp);
+            if (!cu_status.ok() || !cu_resp.success()) {
+                spdlog::warn("MetaReplication: catch-up AppendEntry idx={} to {} failed",
+                             idx, addr);
+                break;
+            }
+            record_ack(addr, idx);
+
+            nimbus::repl::CommitReq cr;
+            cr.set_log_index(idx);
+            cr.set_term(e.term);
+            nimbus::repl::CommitResp cresp;
+            grpc::ClientContext ctx3;
+            stub->CommitEntry(&ctx3, cr, &cresp);
         }
     }
 }

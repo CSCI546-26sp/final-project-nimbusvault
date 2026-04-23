@@ -3,7 +3,7 @@
 #include <fstream>
 #include <cstring>
 #include <stdexcept>
-#include <vector>
+#include <sstream>
 
 namespace nimbus {
 
@@ -36,6 +36,7 @@ static std::string serialize_chunk(const ChunkEntry& e) {
     for (auto& n : e.replica_set) s += n + ",";
     s += ";";
     for (auto& n : e.old_replica_set) s += n + ",";
+    s += ";";
     return s;
 }
 
@@ -112,14 +113,66 @@ static NodeEntry deserialize_node(const std::string& s) {
     return n;
 }
 
+static std::vector<std::string> split_csv(const std::string& s) {
+    std::vector<std::string> out;
+    std::string cur;
+    for (char c : s) {
+        if (c == ',') { if (!cur.empty()) { out.push_back(cur); cur.clear(); } }
+        else cur.push_back(c);
+    }
+    if (!cur.empty()) out.push_back(cur);
+    return out;
+}
+
+static NodeEntry parse_node(const std::string& s) {
+    std::vector<std::string> parts;
+    std::string cur;
+    for (char c : s) {
+        if (c == ';') { parts.push_back(cur); cur.clear(); }
+        else cur.push_back(c);
+    }
+    if (!cur.empty()) parts.push_back(cur);
+    if (parts.size() < 7) throw std::runtime_error("malformed node entry");
+    NodeEntry n;
+    n.node_id         = parts[0];
+    n.address         = parts[1];
+    n.load_fraction   = std::stof(parts[2]);
+    n.free_bytes      = std::stoull(parts[3]);
+    n.total_bytes     = std::stoull(parts[4]);
+    n.failure_rate_7d = std::stof(parts[5]);
+    n.last_seen_ms    = std::stoull(parts[6]);
+    n.alive           = true;
+    return n;
+}
+
+static ChunkEntry parse_chunk(const std::string& s) {
+    std::vector<std::string> parts;
+    std::string cur;
+    for (char c : s) {
+        if (c == ';') { parts.push_back(cur); cur.clear(); }
+        else cur.push_back(c);
+    }
+    if (!cur.empty()) parts.push_back(cur);
+    if (parts.size() < 7) throw std::runtime_error("malformed chunk entry");
+    ChunkEntry e;
+    e.chunk_id          = parts[0];
+    e.version           = std::stoull(parts[1]);
+    e.replication_factor = std::stoi(parts[2]);
+    e.size_bytes        = std::stoull(parts[3]);
+    e.config_state      = static_cast<ChunkConfigState>(std::stoi(parts[4]));
+    e.replica_set       = split_csv(parts[5]);
+    e.old_replica_set   = split_csv(parts[6]);
+    return e;
+}
+
 MetaSnapshot::MetaSnapshot(MetaCoordinator& coord, MetaWal& wal,
                              const std::string& data_dir)
     : coord_(coord), wal_(wal), data_dir_(data_dir) {}
 
 std::pair<std::string, uint64_t> MetaSnapshot::take_snapshot() {
-    uint64_t lsn      = wal_.committed_index();
-    auto     chunks   = coord_.get_chunks();
-    auto     nodes    = coord_.get_nodes();
+    uint64_t lsn    = wal_.committed_index();
+    auto     nodes  = coord_.get_nodes();
+    auto     chunks = coord_.get_chunks();
 
     std::string buf;
 
@@ -165,23 +218,21 @@ uint64_t MetaSnapshot::install_snapshot(const std::string& snapshot_data) {
     nodes.reserve(node_count);
     for (uint32_t i = 0; i < node_count; ++i) {
         std::string entry = read_lp(buf, len, off);
-        nodes.push_back(deserialize_node(entry));
+        nodes.push_back(parse_node(entry));
     }
 
-    if (off + 4 > len) throw std::runtime_error("snapshot truncated (chunk_count)");
     uint32_t cc_be;
-    std::memcpy(&cc_be, buf + off, 4);
-    off += 4;
+    std::memcpy(&cc_be, buf + off, 4); off += 4;
     uint32_t chunk_count = __builtin_bswap32(cc_be);
 
     std::vector<ChunkEntry> chunks;
     chunks.reserve(chunk_count);
     for (uint32_t i = 0; i < chunk_count; ++i) {
         std::string entry = read_lp(buf, len, off);
-        chunks.push_back(deserialize_chunk(entry));
+        chunks.push_back(parse_chunk(entry));
     }
 
-    coord_.apply_snapshot_state(nodes, chunks);
+    coord_.restore_snapshot(nodes, chunks);
 
     spdlog::info("MetaSnapshot::install_snapshot lsn={} nodes={} chunks={}",
                  lsn, node_count, chunk_count);
