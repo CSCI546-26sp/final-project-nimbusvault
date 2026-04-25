@@ -121,20 +121,6 @@ void MetaCoordinator::evict_stale_nodes(uint64_t now_ms_val, uint64_t timeout_ms
     }
 }
 
-void MetaCoordinator::apply_snapshot_state(const std::vector<NodeEntry>& nodes,
-                                            const std::vector<ChunkEntry>& chunks) {
-    std::lock_guard<std::mutex> lk(mu_);
-    node_table_.clear();
-    chunk_table_.clear();
-
-    for (const auto& n : nodes) {
-        node_table_[n.node_id] = n;
-    }
-    for (const auto& c : chunks) {
-        chunk_table_[c.chunk_id] = c;
-    }
-}
-
 uint64_t MetaCoordinator::next_version(const std::string& chunk_id) {
     std::lock_guard<std::mutex> lk(mu_);
     auto it = chunk_table_.find(chunk_id);

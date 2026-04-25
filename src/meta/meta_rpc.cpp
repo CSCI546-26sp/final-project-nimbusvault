@@ -5,6 +5,17 @@
 
 namespace nimbus {
 
+static std::string encode_replica_target(const MetaCoordinator& coord,
+                                          const std::string& node_id_or_entry) {
+    if (node_id_or_entry.find('=') != std::string::npos)
+        return node_id_or_entry;
+    for (const auto& n : coord.get_alive_nodes()) {
+        if (n.node_id == node_id_or_entry)
+            return node_id_or_entry + "=" + n.address;
+    }
+    return node_id_or_entry; // no address known yet; caller uses node_id alone
+}
+
 MetaRpcService::MetaRpcService(MetaCoordinator& coord,
                                 MetaReplication* repl,
                                 const NodeConfig& cfg,
@@ -21,7 +32,15 @@ grpc::Status MetaRpcService::PutChunk(grpc::ServerContext*,
         return grpc::Status::OK;
     }
 
+    const ChunkEntry* existing = coord_.get_chunk(req->chunk_id());
+    if (existing && existing->config_state == ChunkConfigState::TRANSITIONING) {
+        resp->set_ok(false);
+        resp->set_error("ChunkTransitioning");
+        return grpc::Status::OK;
+    }
+
     PlacementConfig pcfg;
+    pcfg.random_placement = (cfg_.mode == "baseline");
     Placement placement(pcfg);
     auto alive = coord_.get_alive_nodes();
     auto nodes = placement.select_nodes(req->desired_rf(), alive, {}, req->chunk_id());
@@ -38,7 +57,7 @@ grpc::Status MetaRpcService::PutChunk(grpc::ServerContext*,
                           std::to_string(req->size_bytes()) + "|" +
                           std::to_string(req->desired_rf()) + "|" +
                           std::to_string(version) + "|";
-    for (auto& n : nodes) payload += n + ",";
+    for (auto& n : nodes) payload += encode_replica_target(coord_, n) + ",";
 
     auto result = repl_->write(WalEntryType::PUT_CHUNK, payload);
     if (result != WriteResult::OK) {
@@ -150,11 +169,9 @@ grpc::Status MetaRpcService::NodeHeartbeat(grpc::ServerContext*,
         }
     }
 
-    // Return the set of chunk IDs assigned to this storage node.
     auto all_chunks = coord_.get_chunks();
     for (const auto& c : all_chunks) {
         for (const auto& replica : c.replica_set) {
-            // replica entries are "node_id=address"; extract node_id
             const size_t eq = replica.find('=');
             const std::string rid = (eq != std::string::npos) ? replica.substr(0, eq) : replica;
             if (rid == req->node_id()) {

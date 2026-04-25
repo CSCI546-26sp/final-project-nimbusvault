@@ -136,9 +136,6 @@ int main(int argc, char** argv) {
     nimbus::MetaWal         wal(cfg.data_dir);
     nimbus::MetaCoordinator coord(cfg);
     nimbus::MetaSnapshot    snapshot(coord, wal, cfg.data_dir);
-    std::unique_ptr<nimbus::Placement> placement;
-    std::unique_ptr<nimbus::AdaptivePolicy> policy;
-    std::unique_ptr<nimbus::ReconfigDriver> reconfig_driver;
 
     // Replay WAL on startup.
     wal.replay([&](const nimbus::WalEntry& e) {
@@ -158,13 +155,6 @@ int main(int argc, char** argv) {
             apply_wal_entry(coord, e);
         });
         for (auto& peer : cfg.peers) repl->add_follower(peer);
-
-        nimbus::PlacementConfig placement_cfg;
-        nimbus::PolicyConfig policy_cfg;
-        placement = std::make_unique<nimbus::Placement>(placement_cfg);
-        policy = std::make_unique<nimbus::AdaptivePolicy>(policy_cfg);
-        reconfig_driver = std::make_unique<nimbus::ReconfigDriver>(coord, *repl, *placement);
-
         spdlog::info("Leader ready with {} followers", cfg.peers.size());
     } else {
         follower = new nimbus::MetaFollower(wal, cfg, [&](uint64_t idx) {
@@ -178,17 +168,18 @@ int main(int argc, char** argv) {
         spdlog::info("Follower ready, leader at {}", cfg.peers.empty() ? "?" : cfg.peers[0]);
     }
 
-    // ── Policy engine (leader only) ───────────────────────────────────────
-    nimbus::AdaptivePolicy*  policy_ptr  = nullptr;
+    // ── Policy engine + reconfig (leader + adaptive mode only) ───────────
+    nimbus::AdaptivePolicy*  policy_ptr   = nullptr;
     nimbus::ReconfigDriver*  reconfig_ptr = nullptr;
     nimbus::Placement*       placement_ptr = nullptr;
 
     if (cfg.role == "leader" && cfg.mode == "adaptive") {
-        nimbus::PlacementConfig pcfg;
+        nimbus::PlacementConfig pcfg;  // multi-dim scoring (random_placement = false)
         placement_ptr = new nimbus::Placement(pcfg);
         nimbus::PolicyConfig policy_cfg;  // defaults: cold_rf=2 warm_rf=3 hot_rf=5
         policy_ptr    = new nimbus::AdaptivePolicy(policy_cfg);
         reconfig_ptr  = new nimbus::ReconfigDriver(coord, *repl, *placement_ptr);
+        spdlog::info("Adaptive policy engine enabled");
     }
 
     // ── gRPC servers ──────────────────────────────────────────────────────

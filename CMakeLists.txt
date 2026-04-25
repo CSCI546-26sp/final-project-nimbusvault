@@ -5,7 +5,6 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Option to build only client/workload and skip server-side dependencies (RocksDB)
 option(NIMBUS_BUILD_CLIENT_ONLY "Build only client + workload (skip RocksDB and servers)" OFF)
 
 if(APPLE)
@@ -32,9 +31,6 @@ set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(googletest)
 
 if(NOT NIMBUS_BUILD_CLIENT_ONLY)
-  # Try to find RocksDB for server-side components. If not present, we do a best-effort
-  # attempt to locate system libraries but do not fatal-error here so local client-only
-  # builds can proceed.
   find_package(RocksDB QUIET)
   if(NOT RocksDB_FOUND)
     if(APPLE)
@@ -177,6 +173,11 @@ target_link_libraries(nimbus_client PUBLIC
 add_executable(workload_runner src/bin/workload_runner.cpp)
 target_link_libraries(workload_runner PRIVATE nimbus_client)
 
+# Admin CLI
+add_executable(nimbus_cli src/bin/nimbus_cli.cpp)
+target_link_libraries(nimbus_cli PRIVATE nimbus_client)
+target_include_directories(nimbus_cli PRIVATE src)
+
 enable_testing()
 
 if(NIMBUS_BUILD_CLIENT_ONLY)
@@ -199,7 +200,8 @@ else()
     tests/unit/test_placement.cpp
     tests/unit/test_chunk_store.cpp
     tests/unit/test_history_tracer.cpp
-    tests/unit/test_meta_integration.cpp
+    tests/unit/test_replica_repair.cpp
+    tests/unit/test_client.cpp
   )
   target_link_libraries(unit_tests PRIVATE
     nimbus_meta

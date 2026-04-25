@@ -37,6 +37,8 @@ struct PlacementConfig {
     double w_cap  = 0.3;
     double w_rel  = 0.2;
     double w_div  = 0.2;
+    // When true, select nodes uniformly at random (used for --mode baseline A/B comparison).
+    bool random_placement = false;
 };
 
 } // namespace nimbus
