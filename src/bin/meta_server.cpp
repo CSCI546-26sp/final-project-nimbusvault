@@ -7,6 +7,7 @@
 #include "../meta/policy.h"
 #include "../meta/placement.h"
 #include "../meta/reconfig_driver.h"
+#include "../meta/recovery.h"
 #include "../common/config.h"
 #include "../common/logger.h"
 #include "../common/clock.h"
@@ -20,6 +21,7 @@
 #include <atomic>
 #include <vector>
 #include <memory>
+#include "storage.grpc.pb.h"
 
 static std::atomic<bool> g_running{true};
 
@@ -49,6 +51,125 @@ static std::vector<std::string> split_nonempty(const std::string& s, char delim)
     }
     if (!cur.empty()) out.push_back(cur);
     return out;
+}
+
+static void delete_chunk_from_replica(const std::string& addr,
+                                      const std::string& chunk_id) {
+    if (addr.empty()) return;
+    auto channel = grpc::CreateChannel(addr, grpc::InsecureChannelCredentials());
+    auto stub = nimbus::storage::StorageNode::NewStub(channel);
+
+    nimbus::storage::DeleteDataReq req;
+    req.set_chunk_id(chunk_id);
+    nimbus::storage::DeleteDataResp resp;
+    grpc::ClientContext ctx;
+    (void)stub->DeleteChunkData(&ctx, req, &resp);
+}
+
+static bool bootstrap_follower_from_leader(nimbus::MetaFollower& follower,
+                                           nimbus::MetaSnapshot& snapshot,
+                                           const nimbus::NodeConfig& cfg) {
+    if (cfg.peers.empty()) return false;
+
+    const std::string& leader_addr = cfg.peers.front();
+    auto channel = grpc::CreateChannel(leader_addr, grpc::InsecureChannelCredentials());
+    auto stub = nimbus::repl::MetaReplication::NewStub(channel);
+
+    grpc::ClientContext snapshot_ctx;
+    nimbus::repl::SnapshotReq req;
+    req.set_snapshot_lsn(0);
+    std::unique_ptr<grpc::ClientReader<nimbus::repl::SnapshotChunk>> reader(
+        stub->InstallSnapshot(&snapshot_ctx, req));
+
+    std::string snapshot_data;
+    uint64_t snapshot_lsn = 0;
+    bool received = false;
+    nimbus::repl::SnapshotChunk chunk;
+    while (reader->Read(&chunk)) {
+        snapshot_data.append(chunk.data());
+        snapshot_lsn = chunk.snapshot_lsn();
+        received = true;
+        if (chunk.is_last_chunk()) break;
+    }
+
+    auto snapshot_status = reader->Finish();
+    if (!snapshot_status.ok() || !received) {
+        spdlog::warn("bootstrap_follower_from_leader: snapshot fetch failed from {}: {}",
+                     leader_addr, snapshot_status.error_message());
+        return false;
+    }
+
+    try {
+        snapshot_lsn = snapshot.install_snapshot(snapshot_data);
+        follower.install_snapshot(snapshot_data, snapshot_lsn);
+    } catch (const std::exception& ex) {
+        spdlog::warn("bootstrap_follower_from_leader: snapshot install failed: {}", ex.what());
+        return false;
+    }
+
+    grpc::ClientContext log_ctx;
+    nimbus::repl::FetchLogReq log_req;
+    log_req.set_from_index(snapshot_lsn + 1);
+    std::unique_ptr<grpc::ClientReader<nimbus::repl::LogEntry>> log_reader(
+        stub->FetchLogEntries(&log_ctx, log_req));
+
+    uint64_t prev_log_index = snapshot_lsn;
+    uint64_t prev_log_term  = 0;
+    nimbus::repl::LogEntry entry;
+    while (log_reader->Read(&entry)) {
+        const auto type = static_cast<nimbus::WalEntryType>(entry.type());
+        const bool ok = follower.handle_append(
+            entry.term(),
+            prev_log_index,
+            prev_log_term,
+            entry.log_index(),
+            entry.term(),
+            type,
+            entry.payload(),
+            snapshot_lsn);
+        if (!ok) {
+            spdlog::warn("bootstrap_follower_from_leader: append failed at idx={}",
+                         entry.log_index());
+            break;
+        }
+        follower.handle_commit(entry.log_index(), entry.term());
+        prev_log_index = entry.log_index();
+        prev_log_term  = entry.term();
+    }
+
+    auto log_status = log_reader->Finish();
+    if (!log_status.ok()) {
+        spdlog::warn("bootstrap_follower_from_leader: log fetch failed from {}: {}",
+                     leader_addr, log_status.error_message());
+        return false;
+    }
+
+    spdlog::info("bootstrap_follower_from_leader: installed snapshot lsn={} and replayed logs from {}",
+                 snapshot_lsn, snapshot_lsn + 1);
+    return true;
+}
+
+static bool parse_heartbeat_payload(const std::string& payload,
+                                    std::string& node_id,
+                                    std::string& address,
+                                    float& load,
+                                    uint64_t& free_bytes,
+                                    uint64_t& total_bytes,
+                                    float& fail_rate) {
+    auto parts = split_nonempty(payload, '|');
+    if (parts.size() < 6) return false;
+
+    node_id = parts[0];
+    address = parts[1];
+    try {
+        load = std::stof(parts[2]);
+        free_bytes = static_cast<uint64_t>(std::stoull(parts[3]));
+        total_bytes = static_cast<uint64_t>(std::stoull(parts[4]));
+        fail_rate = std::stof(parts[5]);
+    } catch (...) {
+        return false;
+    }
+    return true;
 }
 
 static void apply_wal_entry(nimbus::MetaCoordinator& coord, const nimbus::WalEntry& e) {
@@ -90,6 +211,26 @@ static void apply_wal_entry(nimbus::MetaCoordinator& coord, const nimbus::WalEnt
             }
             auto new_set = split_nonempty(parts[1], ',');
             coord.apply_reconfig_commit(parts[0], new_set);
+            return;
+        }
+        case nimbus::WalEntryType::NODE_HEARTBEAT: {
+            std::string node_id;
+            std::string address;
+            float load = 0.0f;
+            uint64_t free_bytes = 0;
+            uint64_t total_bytes = 0;
+            float fail_rate = 0.0f;
+            if (!parse_heartbeat_payload(e.payload,
+                                         node_id,
+                                         address,
+                                         load,
+                                         free_bytes,
+                                         total_bytes,
+                                         fail_rate)) {
+                spdlog::warn("apply_wal_entry: malformed NODE_HEARTBEAT payload idx={}", e.log_index);
+                return;
+            }
+            coord.apply_heartbeat(node_id, address, load, free_bytes, total_bytes, fail_rate);
             return;
         }
         default:
@@ -141,6 +282,10 @@ int main(int argc, char** argv) {
     wal.replay([&](const nimbus::WalEntry& e) {
         apply_wal_entry(coord, e);
     });
+
+    if (cfg.role == "leader") {
+        nimbus::cleanup_uncommitted_puts(wal, coord, delete_chunk_from_replica);
+    }
 
     nimbus::MetaReplication* repl    = nullptr;
     nimbus::MetaFollower*    follower = nullptr;
@@ -200,6 +345,10 @@ int main(int argc, char** argv) {
     builder.RegisterService(&repl_svc);
     auto server = builder.BuildAndStart();
     spdlog::info("gRPC server listening on {}", cfg.address);
+
+    if (follower) {
+        (void)bootstrap_follower_from_leader(*follower, snapshot, cfg);
+    }
 
     // ── Background: heartbeat timer + stale node eviction + policy eval ──
     std::thread hb_thread([&]() {

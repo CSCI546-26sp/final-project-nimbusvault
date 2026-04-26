@@ -14,7 +14,9 @@ public:
                    MetaReplication& repl,
                    const Placement&  placement);
 
-    bool reconfig(const std::string& chunk_id, int new_rf);
+    bool reconfig(const std::string& chunk_id, int new_rf,
+                  const std::string& must_include_node_id = "",
+                  const std::string& must_exclude_node_id = "");
 
 private:
     bool copy_to_new_replicas(const std::string& chunk_id,

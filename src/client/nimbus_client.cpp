@@ -43,6 +43,7 @@ PutResult NimbusClient::put(const std::string& chunk_id,
     preq.set_chunk_id(chunk_id);
     preq.set_size_bytes(data.size());
     preq.set_desired_rf(desired_rf);
+    preq.set_data(data);
 
     nimbus::meta::PutChunkResp presp;
     grpc::ClientContext ctx;
@@ -50,59 +51,9 @@ PutResult NimbusClient::put(const std::string& chunk_id,
     if (!st.ok()) return PutResult{false, st.error_message(), 0, {}};
     if (!presp.ok()) return PutResult{false, presp.error(), presp.version(), {}};
 
-    uint64_t version = presp.version();
-
-    struct Target {
-        std::string node_id;
-        std::string addr;
-        bool ok = false;
-    };
-    std::vector<Target> targets;
-    targets.reserve(presp.replica_set_size());
-    for (const auto& entry : presp.replica_set()) {
-        auto [nid, addr] = parse_replica_entry(entry);
-        targets.push_back({nid, addr, false});
-    }
-
-    auto try_write = [&](Target& t) {
-        auto* stub = get_or_create_stub(t.node_id, t.addr);
-        if (!stub) return;
-        nimbus::storage::WriteChunkReq wreq;
-        wreq.set_chunk_id(chunk_id);
-        wreq.set_version(version);
-        wreq.set_data(data);
-        nimbus::storage::WriteChunkResp wresp;
-        grpc::ClientContext wctx;
-        auto wst = stub->WriteChunk(&wctx, wreq, &wresp);
-        t.ok = wst.ok() && wresp.ok();
-    };
-
-    for (auto& t : targets) try_write(t);
-
-    // Retry each failed node up to 2 more times before giving up.
-    constexpr int kMaxRetries = 2;
-    for (int retry = 0; retry < kMaxRetries; ++retry) {
-        bool any_failed = false;
-        for (const auto& t : targets) if (!t.ok) { any_failed = true; break; }
-        if (!any_failed) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        for (auto& t : targets) if (!t.ok) try_write(t);
-    }
-
     std::vector<std::string> replica_nodes;
-    std::string failed_ids;
-    for (auto& t : targets) {
-        if (t.ok) replica_nodes.push_back(t.addr.empty() ? t.node_id : t.addr);
-        else      failed_ids += t.node_id + ";";
-    }
-
-    if (replica_nodes.empty())
-        return PutResult{false, "all replicas failed: " + failed_ids, version, {}};
-
-    // Partial write is ok — replica_repair heals under-replicated chunks.
-    return PutResult{true,
-                     failed_ids.empty() ? "" : "partial:" + failed_ids,
-                     version, replica_nodes};
+    for (const auto& entry : presp.replica_set()) replica_nodes.push_back(entry);
+    return PutResult{true, "", presp.version(), replica_nodes};
 }
 
 std::vector<std::string> NimbusClient::build_replica_try_list(

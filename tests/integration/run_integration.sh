@@ -95,8 +95,8 @@ run_selected() {
   echo ",$SELECTED," | grep -q ",$name," && return 0 || return 1
 }
 
-pass() { echo "  [PASS] $1"; ((PASS++)); }
-fail() { echo "  [FAIL] $1"; ((FAIL++)); }
+pass() { echo "  [PASS] $1"; ((++PASS)); }
+fail() { echo "  [FAIL] $1"; ((++FAIL)); }
 
 cli() { "$CLI_BIN" --meta "$META_ADDR" "$@"; }
 

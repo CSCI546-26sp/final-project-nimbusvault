@@ -23,6 +23,8 @@ public:
 
     void install_snapshot(const std::string& snapshot_data, uint64_t snapshot_lsn);
 
+    uint64_t installed_snapshot_lsn() const { return snapshot_lsn_; }
+
     uint64_t catch_up_from() const;
 
     uint64_t local_committed() const;
@@ -36,6 +38,7 @@ private:
     NodeConfig     cfg_;
     CommitCallback on_commit_;
     uint64_t       current_term_ = 0;
+    uint64_t       snapshot_lsn_  = 0;
 };
 
 } // namespace nimbus

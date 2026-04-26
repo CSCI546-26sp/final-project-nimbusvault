@@ -119,6 +119,7 @@ add_library(nimbus_meta STATIC
   src/meta/meta_follower.cpp
   src/meta/meta_snapshot.cpp
   src/meta/meta_rpc.cpp
+  src/meta/recovery.cpp
   src/meta/placement.cpp
   src/meta/policy.cpp
   src/meta/reconfig_driver.cpp
@@ -196,6 +197,7 @@ else()
     tests/unit/test_meta_wal.cpp
     tests/unit/test_meta_coordinator.cpp
     tests/unit/test_meta_integration.cpp
+    tests/unit/test_recovery.cpp
     tests/unit/test_policy.cpp
     tests/unit/test_placement.cpp
     tests/unit/test_chunk_store.cpp
