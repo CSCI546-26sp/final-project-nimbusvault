@@ -38,7 +38,15 @@ public:
 
     bool remove(const std::string& chunk_id);
 
+    // Returns replica_set + old_replica_set combined (for TRANSITIONING fallback).
+    // Exposed as public static so unit tests can verify the try-list logic directly.
+    static std::vector<std::string> build_replica_try_list(
+        const nimbus::meta::ChunkMeta& meta);
+
 private:
+    nimbus::storage::StorageNode::Stub* get_or_create_stub(
+        const std::string& node_id, const std::string& addr);
+
     std::shared_ptr<grpc::Channel> meta_channel_;
     std::unique_ptr<nimbus::meta::MetaCoordinator::Stub> meta_stub_;
 

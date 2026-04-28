@@ -24,10 +24,11 @@ public:
     void run_once();
     void stop();
 
-private:
     static bool parse_replica_endpoint(const std::string& entry,
                                        std::string& node_id,
                                        std::string& address);
+
+private:
 
     bool fetch_from_peer(const std::string& peer_addr,
                          const std::string& chunk_id,

@@ -68,6 +68,13 @@ void MetaFollower::handle_commit(uint64_t log_index, uint64_t ) {
 
 void MetaFollower::install_snapshot(const std::string& ,
                                      uint64_t snapshot_lsn) {
+    if (snapshot_lsn < snapshot_lsn_) {
+        spdlog::debug("MetaFollower: ignoring stale snapshot lsn={} current={}",
+                      snapshot_lsn, snapshot_lsn_);
+        return;
+    }
+
+    snapshot_lsn_ = snapshot_lsn;
     spdlog::info("MetaFollower: installed snapshot lsn={}", snapshot_lsn);
 }
 

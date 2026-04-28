@@ -36,6 +36,7 @@ void MetaCoordinator::apply_reconfig_start(const std::string& chunk_id,
     auto it = chunk_table_.find(chunk_id);
     if (it == chunk_table_.end()) return;
     it->second.config_state    = ChunkConfigState::TRANSITIONING;
+    it->second.replication_factor = static_cast<int>(new_set.size());
     it->second.old_replica_set = old_set;
     it->second.replica_set     = new_set;
     spdlog::info("coordinator: RECONFIG_START {} old_sz={} new_sz={}",
@@ -48,6 +49,7 @@ void MetaCoordinator::apply_reconfig_commit(const std::string& chunk_id,
     auto it = chunk_table_.find(chunk_id);
     if (it == chunk_table_.end()) return;
     it->second.config_state = ChunkConfigState::STABLE;
+    it->second.replication_factor = static_cast<int>(new_set.size());
     it->second.replica_set  = new_set;
     it->second.old_replica_set.clear();
     spdlog::info("coordinator: RECONFIG_COMMIT {} rf={}", chunk_id, new_set.size());
@@ -118,20 +120,6 @@ void MetaCoordinator::evict_stale_nodes(uint64_t now_ms_val, uint64_t timeout_ms
             spdlog::warn("coordinator: node {} declared dead (no heartbeat {}ms)",
                          id, timeout_ms);
         }
-    }
-}
-
-void MetaCoordinator::apply_snapshot_state(const std::vector<NodeEntry>& nodes,
-                                            const std::vector<ChunkEntry>& chunks) {
-    std::lock_guard<std::mutex> lk(mu_);
-    node_table_.clear();
-    chunk_table_.clear();
-
-    for (const auto& n : nodes) {
-        node_table_[n.node_id] = n;
-    }
-    for (const auto& c : chunks) {
-        chunk_table_[c.chunk_id] = c;
     }
 }
 

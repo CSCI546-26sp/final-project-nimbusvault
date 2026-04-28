@@ -2,8 +2,89 @@
 #include "placement.h"
 #include "../common/clock.h"
 #include <spdlog/spdlog.h>
+#include <grpcpp/create_channel.h>
+#include "storage.grpc.pb.h"
+
+static std::string strip_node_id(const std::string& entry) {
+    const size_t eq = entry.find('=');
+    return (eq != std::string::npos) ? entry.substr(0, eq) : entry;
+}
+
+static std::string resolve_replica_address(const nimbus::MetaCoordinator& coord,
+                                           const std::string& entry) {
+    const size_t eq = entry.find('=');
+    if (eq != std::string::npos) return entry.substr(eq + 1);
+    for (const auto& n : coord.get_alive_nodes()) {
+        if (n.node_id == entry) return n.address;
+    }
+    return {};
+}
+
+static bool write_chunk_to_replica(const std::string& addr,
+                                   const std::string& chunk_id,
+                                   uint64_t version,
+                                   const std::string& data) {
+    if (addr.empty()) return false;
+    auto channel = grpc::CreateChannel(addr, grpc::InsecureChannelCredentials());
+    auto stub = nimbus::storage::StorageNode::NewStub(channel);
+
+    nimbus::storage::WriteChunkReq req;
+    req.set_chunk_id(chunk_id);
+    req.set_version(version);
+    req.set_data(data);
+
+    nimbus::storage::WriteChunkResp resp;
+    grpc::ClientContext ctx;
+    auto st = stub->WriteChunk(&ctx, req, &resp);
+    return st.ok() && resp.ok();
+}
+
+static void delete_chunk_from_replica(const std::string& addr,
+                                     const std::string& chunk_id) {
+    if (addr.empty()) return;
+    auto channel = grpc::CreateChannel(addr, grpc::InsecureChannelCredentials());
+    auto stub = nimbus::storage::StorageNode::NewStub(channel);
+
+    nimbus::storage::DeleteDataReq req;
+    req.set_chunk_id(chunk_id);
+    nimbus::storage::DeleteDataResp resp;
+    grpc::ClientContext ctx;
+    (void)stub->DeleteChunkData(&ctx, req, &resp);
+}
 
 namespace nimbus {
+
+static std::string encode_replica_target(const MetaCoordinator& coord,
+                                          const std::string& node_id_or_entry) {
+    if (node_id_or_entry.find('=') != std::string::npos)
+        return node_id_or_entry;
+    for (const auto& n : coord.get_alive_nodes()) {
+        if (n.node_id == node_id_or_entry)
+            return node_id_or_entry + "=" + n.address;
+    }
+    return node_id_or_entry; // no address known yet; caller uses node_id alone
+}
+
+static std::string encode_heartbeat_payload(const nimbus::meta::HeartbeatReq& req) {
+    return req.node_id() + "|" +
+           req.address() + "|" +
+           std::to_string(req.load_fraction()) + "|" +
+           std::to_string(req.free_bytes()) + "|" +
+           std::to_string(req.total_bytes()) + "|" +
+           std::to_string(req.failure_rate_7d());
+}
+
+static std::string extract_node_id(const std::string& entry) {
+    const size_t eq = entry.find('=');
+    return (eq != std::string::npos) ? entry.substr(0, eq) : entry;
+}
+
+static bool has_replica_node(const ChunkEntry& entry, const std::string& node_id) {
+    for (const auto& e : entry.replica_set) {
+        if (extract_node_id(e) == node_id) return true;
+    }
+    return false;
+}
 
 MetaRpcService::MetaRpcService(MetaCoordinator& coord,
                                 MetaReplication* repl,
@@ -21,7 +102,15 @@ grpc::Status MetaRpcService::PutChunk(grpc::ServerContext*,
         return grpc::Status::OK;
     }
 
+    const ChunkEntry* existing = coord_.get_chunk(req->chunk_id());
+    if (existing && existing->config_state == ChunkConfigState::TRANSITIONING) {
+        resp->set_ok(false);
+        resp->set_error("ChunkTransitioning");
+        return grpc::Status::OK;
+    }
+
     PlacementConfig pcfg;
+    pcfg.random_placement = (cfg_.mode == "baseline");
     Placement placement(pcfg);
     auto alive = coord_.get_alive_nodes();
     auto nodes = placement.select_nodes(req->desired_rf(), alive, {}, req->chunk_id());
@@ -34,28 +123,66 @@ grpc::Status MetaRpcService::PutChunk(grpc::ServerContext*,
 
     uint64_t version = coord_.next_version(req->chunk_id());
 
+    const std::string data = req->data();
+    std::vector<std::string> replica_entries;
+    replica_entries.reserve(nodes.size());
+    std::vector<std::string> successful_addrs;
+    std::string failed_ids;
+
+    for (const auto& n : nodes) {
+        const std::string entry = encode_replica_target(coord_, n);
+        const std::string addr = resolve_replica_address(coord_, entry);
+        replica_entries.push_back(entry);
+
+        if (write_chunk_to_replica(addr, req->chunk_id(), version, data)) {
+            successful_addrs.push_back(addr);
+        } else {
+            failed_ids += strip_node_id(entry) + ";";
+        }
+    }
+
+    const size_t majority_needed = (replica_entries.size() / 2) + 1;
+    if (successful_addrs.size() < majority_needed) {
+        for (const auto& addr : successful_addrs) {
+            delete_chunk_from_replica(addr, req->chunk_id());
+        }
+        resp->set_ok(false);
+        resp->set_error(failed_ids.empty() ? "storage majority unavailable"
+                                           : "storage majority unavailable: " + failed_ids);
+        return grpc::Status::OK;
+    }
+
     std::string payload = req->chunk_id() + "|" +
                           std::to_string(req->size_bytes()) + "|" +
                           std::to_string(req->desired_rf()) + "|" +
                           std::to_string(version) + "|";
-    for (auto& n : nodes) payload += n + ",";
+    for (auto& n : replica_entries) payload += n + ",";
 
     auto result = repl_->write(WalEntryType::PUT_CHUNK, payload);
     if (result != WriteResult::OK) {
+        for (const auto& addr : successful_addrs) {
+            delete_chunk_from_replica(addr, req->chunk_id());
+        }
         resp->set_ok(false);
-        resp->set_error("quorum unavailable");
+        resp->set_error("metadata quorum unavailable after storage write");
         return grpc::Status::OK;
     }
 
     resp->set_ok(true);
     resp->set_version(version);
-    for (auto& n : nodes) resp->add_replica_set(encode_replica_target(coord_, n));
+    for (auto& n : replica_entries) resp->add_replica_set(n);
     return grpc::Status::OK;
 }
 
 grpc::Status MetaRpcService::GetChunkInfo(grpc::ServerContext*,
                                            const nimbus::meta::ChunkInfoReq* req,
                                            nimbus::meta::ChunkInfoResp* resp) {
+    if (!repl_) {
+        resp->set_ok(false);
+        resp->set_error("NotLeader");
+        return grpc::Status::OK;
+    }
+
     auto* entry = coord_.get_chunk(req->chunk_id());
     if (!entry) {
         resp->set_ok(false);
@@ -108,8 +235,18 @@ grpc::Status MetaRpcService::AddReplica(grpc::ServerContext*,
         resp->set_error("chunk not found");
         return grpc::Status::OK;
     }
+    if (req->node_id().empty()) {
+        resp->set_ok(false);
+        resp->set_error("node_id required");
+        return grpc::Status::OK;
+    }
+    if (has_replica_node(*entry, req->node_id())) {
+        resp->set_ok(false);
+        resp->set_error("node already in replica set");
+        return grpc::Status::OK;
+    }
     int new_rf = static_cast<int>(entry->replica_set.size()) + 1;
-    bool ok = reconfig_->reconfig(req->chunk_id(), new_rf);
+    bool ok = reconfig_->reconfig(req->chunk_id(), new_rf, req->node_id(), "");
     resp->set_ok(ok);
     if (!ok) resp->set_error("reconfig failed");
     return grpc::Status::OK;
@@ -129,8 +266,18 @@ grpc::Status MetaRpcService::RemoveReplica(grpc::ServerContext*,
         resp->set_error(entry ? "cannot remove last replica" : "chunk not found");
         return grpc::Status::OK;
     }
+    if (req->node_id().empty()) {
+        resp->set_ok(false);
+        resp->set_error("node_id required");
+        return grpc::Status::OK;
+    }
+    if (!has_replica_node(*entry, req->node_id())) {
+        resp->set_ok(false);
+        resp->set_error("node not in replica set");
+        return grpc::Status::OK;
+    }
     int new_rf = static_cast<int>(entry->replica_set.size()) - 1;
-    bool ok = reconfig_->reconfig(req->chunk_id(), new_rf);
+    bool ok = reconfig_->reconfig(req->chunk_id(), new_rf, "", req->node_id());
     resp->set_ok(ok);
     if (!ok) resp->set_error("reconfig failed");
     return grpc::Status::OK;
@@ -139,9 +286,19 @@ grpc::Status MetaRpcService::RemoveReplica(grpc::ServerContext*,
 grpc::Status MetaRpcService::NodeHeartbeat(grpc::ServerContext*,
                                             const nimbus::meta::HeartbeatReq* req,
                                             nimbus::meta::HeartbeatResp* resp) {
-    coord_.apply_heartbeat(req->node_id(), req->address(),
-                           req->load_fraction(), req->free_bytes(),
-                           req->total_bytes(), req->failure_rate_7d());
+    if (!repl_) {
+        resp->set_ok(false);
+        if (!cfg_.peers.empty()) resp->set_leader_hint(cfg_.peers.front());
+        return grpc::Status::OK;
+    }
+
+    const std::string payload = encode_heartbeat_payload(*req);
+    auto result = repl_->write(WalEntryType::NODE_HEARTBEAT, payload);
+    if (result != WriteResult::OK) {
+        resp->set_ok(false);
+        resp->set_leader_hint(cfg_.address);
+        return grpc::Status::OK;
+    }
 
     if (policy_) {
         const uint64_t window_ms = static_cast<uint64_t>(cfg_.heartbeat_interval_ms);
@@ -150,11 +307,9 @@ grpc::Status MetaRpcService::NodeHeartbeat(grpc::ServerContext*,
         }
     }
 
-    // Return the set of chunk IDs assigned to this storage node.
     auto all_chunks = coord_.get_chunks();
     for (const auto& c : all_chunks) {
         for (const auto& replica : c.replica_set) {
-            // replica entries are "node_id=address"; extract node_id
             const size_t eq = replica.find('=');
             const std::string rid = (eq != std::string::npos) ? replica.substr(0, eq) : replica;
             if (rid == req->node_id()) {

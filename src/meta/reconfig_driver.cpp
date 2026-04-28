@@ -28,7 +28,32 @@ ReconfigDriver::ReconfigDriver(MetaCoordinator& coord,
                                 const Placement&  placement)
     : coord_(coord), repl_(repl), placement_(placement) {}
 
-bool ReconfigDriver::reconfig(const std::string& chunk_id, int new_rf) {
+static std::string resolve_address(const std::string& entry,
+                                    const std::vector<NodeEntry>& alive) {
+    const size_t eq = entry.find('=');
+    if (eq != std::string::npos) return entry.substr(eq + 1);
+    for (const auto& n : alive) {
+        if (n.node_id == entry) return n.address;
+    }
+    return {};
+}
+
+static std::string encode_entry(const std::string& node_id,
+                                 const std::vector<NodeEntry>& alive) {
+    for (const auto& n : alive) {
+        if (n.node_id == node_id) return node_id + "=" + n.address;
+    }
+    return node_id;
+}
+
+static std::string extract_node_id(const std::string& entry) {
+    const size_t eq = entry.find('=');
+    return (eq != std::string::npos) ? entry.substr(0, eq) : entry;
+}
+
+bool ReconfigDriver::reconfig(const std::string& chunk_id, int new_rf,
+                               const std::string& must_include_node_id,
+                               const std::string& must_exclude_node_id) {
     const ChunkEntry* entry = coord_.get_chunk(chunk_id);
     if (!entry) {
         spdlog::error("ReconfigDriver: chunk {} not found", chunk_id);
@@ -42,14 +67,68 @@ bool ReconfigDriver::reconfig(const std::string& chunk_id, int new_rf) {
     std::vector<std::string> old_set = entry->replica_set;
     uint64_t current_version = entry->version;
 
-    std::unordered_set<std::string> exclude(old_set.begin(), old_set.end());
     auto alive = coord_.get_alive_nodes();
-    auto new_nodes = placement_.select_nodes(new_rf, alive, exclude, chunk_id);
+    std::unordered_set<std::string> alive_ids;
+    for (const auto& n : alive) alive_ids.insert(n.node_id);
 
-    if (static_cast<int>(new_nodes.size()) < new_rf) {
+    std::vector<std::string> target_ids;
+    target_ids.reserve(static_cast<size_t>(std::max(new_rf, 0)));
+    std::unordered_set<std::string> target_set;
+
+    for (const auto& e : old_set) {
+        const std::string id = extract_node_id(e);
+        if (!must_exclude_node_id.empty() && id == must_exclude_node_id) continue;
+        if (target_set.insert(id).second) target_ids.push_back(id);
+    }
+
+    if (!must_include_node_id.empty()) {
+        if (!alive_ids.count(must_include_node_id)) {
+            spdlog::error("ReconfigDriver: requested include node {} is not alive", must_include_node_id);
+            return false;
+        }
+        if (target_set.insert(must_include_node_id).second) {
+            target_ids.push_back(must_include_node_id);
+        }
+    }
+
+    if (new_rf < 0) {
+        spdlog::error("ReconfigDriver: invalid new_rf={}", new_rf);
+        return false;
+    }
+
+    if (static_cast<int>(target_ids.size()) > new_rf) {
+        std::vector<std::string> trimmed;
+        trimmed.reserve(static_cast<size_t>(new_rf));
+        for (const auto& id : target_ids) {
+            if (id == must_include_node_id) continue;
+            if (static_cast<int>(trimmed.size()) >= new_rf) break;
+            trimmed.push_back(id);
+        }
+        if (!must_include_node_id.empty() && static_cast<int>(trimmed.size()) < new_rf) {
+            trimmed.push_back(must_include_node_id);
+        }
+        target_ids = std::move(trimmed);
+        target_set.clear();
+        for (const auto& id : target_ids) target_set.insert(id);
+    }
+
+    if (static_cast<int>(target_ids.size()) < new_rf) {
+        const int needed = new_rf - static_cast<int>(target_ids.size());
+        auto selected = placement_.select_nodes(needed, alive, target_set, chunk_id);
+        for (const auto& id : selected) {
+            if (target_set.insert(id).second) target_ids.push_back(id);
+        }
+    }
+
+    if (static_cast<int>(target_ids.size()) < new_rf) {
         spdlog::error("ReconfigDriver: not enough nodes for rf={}", new_rf);
         return false;
     }
+
+    std::vector<std::string> new_nodes;
+    new_nodes.reserve(target_ids.size());
+    for (const auto& nid : target_ids)
+        new_nodes.push_back(encode_entry(nid, alive));
 
     spdlog::info("ReconfigDriver: START chunk={} old_rf={} new_rf={}",
                  chunk_id, old_set.size(), new_rf);
@@ -62,7 +141,8 @@ bool ReconfigDriver::reconfig(const std::string& chunk_id, int new_rf) {
         return false;
     }
 
-    // Step 2: coordinator now marks chunk TRANSITIONING (applied in on_commit callback).
+    // Step 2: coordinator marks chunk TRANSITIONING via the on_commit callback wired
+    // in meta_server.cpp → apply_wal_entry → coord.apply_reconfig_start().
 
     // Step 3: copy chunk data to new replicas.
     if (!copy_to_new_replicas(chunk_id, current_version, old_set, new_nodes)) {
@@ -98,15 +178,18 @@ bool ReconfigDriver::copy_to_new_replicas(const std::string& chunk_id,
                                            const std::vector<std::string>& src_nodes,
                                            const std::vector<std::string>& new_nodes) {
     if (src_nodes.empty()) return true;
-    const std::string& src_addr = src_nodes[0];  
 
-    for (const auto& dst_node_id : new_nodes) {
-        std::string dst_addr;
-        for (auto& n : coord_.get_alive_nodes()) {
-            if (n.node_id == dst_node_id) { dst_addr = n.address; break; }
-        }
+    auto alive = coord_.get_alive_nodes();
+    const std::string src_addr = resolve_address(src_nodes[0], alive);
+    if (src_addr.empty()) {
+        spdlog::error("ReconfigDriver: cannot resolve address for source {}", src_nodes[0]);
+        return false;
+    }
+
+    for (const auto& dst_entry : new_nodes) {
+        const std::string dst_addr = resolve_address(dst_entry, alive);
         if (dst_addr.empty()) {
-            spdlog::error("ReconfigDriver: no address for node {}", dst_node_id);
+            spdlog::error("ReconfigDriver: no address for dest node {}", dst_entry);
             return false;
         }
         auto src_channel = grpc::CreateChannel(src_addr, grpc::InsecureChannelCredentials());
@@ -155,12 +238,13 @@ bool ReconfigDriver::copy_to_new_replicas(const std::string& chunk_id,
 bool ReconfigDriver::verify_replicas(const std::string& chunk_id,
                                       uint64_t required_version,
                                       const std::vector<std::string>& nodes) {
-    for (const auto& node_id : nodes) {
-        std::string addr;
-        for (auto& n : coord_.get_alive_nodes()) {
-            if (n.node_id == node_id) { addr = n.address; break; }
+    auto alive = coord_.get_alive_nodes();
+    for (const auto& entry : nodes) {
+        const std::string addr = resolve_address(entry, alive);
+        if (addr.empty()) {
+            spdlog::error("ReconfigDriver: verify — no address for {}", entry);
+            return false;
         }
-        if (addr.empty()) return false;
 
         auto channel = grpc::CreateChannel(addr, grpc::InsecureChannelCredentials());
         auto stub = nimbus::storage::StorageNode::NewStub(channel);
@@ -173,7 +257,7 @@ bool ReconfigDriver::verify_replicas(const std::string& chunk_id,
         grpc::ClientContext ctx;
         auto s = stub->ReadChunk(&ctx, req, &resp);
         if (!s.ok() || !resp.ok() || resp.version() < required_version) {
-            spdlog::error("ReconfigDriver: verify failed on node {} chunk={}", node_id, chunk_id);
+            spdlog::error("ReconfigDriver: verify failed on {} chunk={}", entry, chunk_id);
             return false;
         }
     }

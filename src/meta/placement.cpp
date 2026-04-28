@@ -1,5 +1,6 @@
 #include "placement.h"
 #include <algorithm>
+#include <random>
 #include <spdlog/spdlog.h>
 
 namespace nimbus {
@@ -28,7 +29,6 @@ std::vector<std::string> Placement::select_nodes(
         const std::string& /*chunk_id*/) const {
 
     std::vector<std::string> result;
-    std::unordered_set<std::string> chosen;
 
     // Build candidate list (excluding forbidden nodes)
     std::vector<const NodeEntry*> candidates;
@@ -37,15 +37,23 @@ std::vector<std::string> Placement::select_nodes(
             candidates.push_back(&node);
     }
 
-    // Greedy: re-score after each pick so diversity weight reflects chosen set
-    for (int i = 0; i < n && !candidates.empty(); ++i) {
-        auto best = std::max_element(candidates.begin(), candidates.end(),
-            [&](const NodeEntry* a, const NodeEntry* b) {
-                return score(*a, chosen) < score(*b, chosen);
-            });
-        result.push_back((*best)->node_id);
-        chosen.insert((*best)->node_id);
-        candidates.erase(best);
+    if (cfg_.random_placement) {
+        static thread_local std::mt19937 rng{std::random_device{}()};
+        std::shuffle(candidates.begin(), candidates.end(), rng);
+        for (int i = 0; i < n && i < static_cast<int>(candidates.size()); ++i)
+            result.push_back(candidates[i]->node_id);
+    } else {
+        // Adaptive mode: greedy multi-dimensional scoring.
+        std::unordered_set<std::string> chosen;
+        for (int i = 0; i < n && !candidates.empty(); ++i) {
+            auto best = std::max_element(candidates.begin(), candidates.end(),
+                [&](const NodeEntry* a, const NodeEntry* b) {
+                    return score(*a, chosen) < score(*b, chosen);
+                });
+            result.push_back((*best)->node_id);
+            chosen.insert((*best)->node_id);
+            candidates.erase(best);
+        }
     }
 
     if (static_cast<int>(result.size()) < n) {
