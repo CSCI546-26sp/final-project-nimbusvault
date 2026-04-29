@@ -267,51 +267,12 @@ info_pretty "research-paper"
 ok "Same cluster. Same hardware. Different files, different replica counts. Zero manual config."
 pause
 
-# ─────────────────────────────────────────────────────────────────────────────
-#  SCENE 4 — FAULT TOLERANCE: KILL A NODE
-# ─────────────────────────────────────────────────────────────────────────────
-clear
-section "SCENE 4  —  Kill a Storage Server" \
-        "Fault tolerance — reads must still succeed"
-
-RF_BEFORE_KILL=$("$CLI" --meta "$META" info viral-video 2>/dev/null | grep "^rf:" | awk '{print $2}') || RF_BEFORE_KILL="3"
-REPLICAS_AFTER=$((RF_BEFORE_KILL - 1))
-
-narrate "We are going to kill storage node sn2 — hard kill, no warning."
-narrate "viral-video is at RF=${RF_BEFORE_KILL}. After the kill we still have ${REPLICAS_AFTER} live replicas."
-
-SN2_PID=$(pgrep -f -- "--id sn2" 2>/dev/null | head -1 || echo "")
-
-if [[ -z "$SN2_PID" ]]; then
-  warn "sn2 is not running (may have already exited). Demonstrating the concept instead."
-  narrate "In a real run:  kill \$(pgrep -f '--id sn2')  — reads still succeed."
-else
-  echo ""
-  echo -e "${RED}${BOLD}  \$ kill $SN2_PID   # sn2 (127.0.0.1:9202) — hard kill${RESET}"
-  sleep 0.7
-  kill "$SN2_PID" 2>/dev/null || true
-  sleep 0.8
-  ok "sn2 is down. ${REPLICAS_AFTER} replicas still alive."
-  echo ""
-
-  narrate "Reading viral-video — client automatically routes to a live replica."
-  run "$CLI --meta $META get viral-video"
-  ok "Read succeeded. Client routed around the dead node with no config change."
-  echo ""
-
-  info_pretty "viral-video"
-
-  narrate "sn2 still appears in the replica list — not declared dead yet."
-  narrate "After ~3 missed heartbeats the metadata server evicts sn2 and triggers replica repair."
-fi
-
-pause
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  SCENE 5 — TAPERED READS: COLD → WARM → COLD
+#  SCENE 4 — TAPERED READS: COLD → WARM → COLD
 # ─────────────────────────────────────────────────────────────────────────────
 clear
-section "SCENE 5  —  Tapered Reads" \
+section "SCENE 4  —  Tapered Reads" \
         "Moderate traffic lands viral-video in the WARM band, not HOT"
 
 narrate "viral-video is COLD (RF=2). We now read it at ~0.5 r/s — one get every 2s."
