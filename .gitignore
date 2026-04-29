@@ -2,6 +2,10 @@
 build/
 out/
 cmake-build-*/
+venv/
+bench/results/
+dashboard/
+bench/analysis/
 
 # CMake generated files
 CMakeCache.txt
@@ -23,6 +27,10 @@ install_manifest.txt
 *.dylib
 *.dll
 *.exe
+*.csv
+*.tsv
+*.png
+*results.txt
 
 # Logs and runtime data
 *.log
