@@ -118,6 +118,18 @@ bash scripts/demo.sh
 
 ---
 
+### Benchmark Scripts (`bench/scripts/`)
+
+| Script | Usage | Description |
+|---|---|---|
+| `bench/scripts/run_benchmark.sh` | `bash bench/scripts/run_benchmark.sh` | Quick single benchmark run. Starts a cluster and runs the workload in default mode, and saves results in a .csv file in the same directory |
+
+#### `run_benchmark.sh`
+
+```bash
+bash bench/scripts/run_benchmark.sh
+```
+
 ### Testing Scripts
 
 #### Unit Tests
