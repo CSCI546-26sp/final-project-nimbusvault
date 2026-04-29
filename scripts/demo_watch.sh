@@ -66,7 +66,7 @@ while true; do
 
       rf=$(echo    "$info" | grep "^rf:"    | awk '{print $2}')
       state=$(echo "$info" | grep "^state:" | awk '{print $2}')
-      replicas=$(echo "$info" | grep "^  sn" | awk -F'=' '{print $1}' | tr -d ' ' | paste -sd ',' -)
+      replicas=$(echo "$info" | awk '/^replicas:/{f=1;next} /^old_replicas/{f=0} f && /^  sn/{id=$1; sub(/=.*/,"",id); printf "%s,",id}' | sed 's/,$//')
 
       col=$(rf_color   "$rf")
       tier=$(tier_label "$rf")

@@ -20,10 +20,10 @@ struct ChunkAccessState {
     ChunkTier tier          = ChunkTier::WARM;
 
     // Accumulator filled by record_accesses() between evaluations, drained by
-    // evaluate(). A chunk with no heartbeats in the window resolves to rate=0
-    // rather than sticking at its last reported rate forever.
-    uint64_t pending_count     = 0;
-    uint64_t pending_window_ms = 0;
+    // evaluate(). Rate = pending_count / wall-clock elapsed since last evaluate(),
+    // so a chunk reported in only one of ten heartbeat intervals is not inflated.
+    uint64_t pending_count  = 0;
+    uint64_t last_eval_ms   = 0;  // unix_ms() at last evaluate(); 0 = never
 };
 
 struct PolicyDecision {

@@ -353,7 +353,7 @@ int main(int argc, char** argv) {
     // ── Background: heartbeat timer + stale node eviction + policy eval ──
     std::thread hb_thread([&]() {
         uint32_t policy_tick = 0;
-        const uint32_t policy_every = 5;  // evaluate policy every 5 heartbeat intervals
+        const uint32_t policy_every = 10; // evaluate policy every 10 heartbeat intervals (~2s)
         while (g_running) {
             std::this_thread::sleep_for(
                 std::chrono::milliseconds(cfg.heartbeat_interval_ms));
