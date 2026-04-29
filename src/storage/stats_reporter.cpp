@@ -11,9 +11,22 @@
 namespace nimbus {
 
 StatsReporter::StatsReporter(const NodeConfig& cfg, const std::string& meta_addr)
-    : cfg_(cfg), meta_addr_(meta_addr) {
-    channel_ = grpc::CreateChannel(meta_addr_, grpc::InsecureChannelCredentials());
+    : cfg_(cfg) {
+    // meta_addr may be comma-separated list of all meta nodes for failover.
+    std::string cur;
+    for (char c : meta_addr) {
+        if (c == ',') { if (!cur.empty()) { meta_addrs_.push_back(cur); cur.clear(); } }
+        else cur += c;
+    }
+    if (!cur.empty()) meta_addrs_.push_back(cur);
+    if (meta_addrs_.empty()) meta_addrs_.push_back(meta_addr);
+    reconnect(meta_addrs_[0]);
+}
+
+void StatsReporter::reconnect(const std::string& addr) {
+    channel_ = grpc::CreateChannel(addr, grpc::InsecureChannelCredentials());
     stub_ = nimbus::meta::MetaCoordinator::NewStub(channel_);
+    spdlog::debug("StatsReporter: connected to meta {}", addr);
 }
 
 void StatsReporter::record_access(const std::string& chunk_id) {
@@ -52,7 +65,31 @@ void StatsReporter::run_once() {
     nimbus::meta::HeartbeatResp resp;
     grpc::ClientContext ctx;
     grpc::Status status = stub_->NodeHeartbeat(&ctx, req, &resp);
-    if (status.ok()) {
+
+    if (!status.ok()) {
+        // Connection failed — try next meta address in the list.
+        if (meta_addrs_.size() > 1) {
+            current_meta_idx_ = (current_meta_idx_ + 1) % meta_addrs_.size();
+            spdlog::info("StatsReporter: meta unreachable, trying {}",
+                         meta_addrs_[current_meta_idx_]);
+            reconnect(meta_addrs_[current_meta_idx_]);
+        }
+        return;
+    }
+
+    if (!resp.ok() && !resp.leader_hint().empty()) {
+        // Follower redirected us to the actual leader.
+        const std::string& hint = resp.leader_hint();
+        spdlog::info("StatsReporter: redirected to leader {}", hint);
+        reconnect(hint);
+        // Also update our primary so we reconnect here on next cycle.
+        for (size_t i = 0; i < meta_addrs_.size(); ++i) {
+            if (meta_addrs_[i] == hint) { current_meta_idx_ = i; break; }
+        }
+        return;
+    }
+
+    if (status.ok() && resp.ok()) {
         std::vector<std::string> assigned;
         assigned.assign(resp.assigned_chunk_ids().begin(), resp.assigned_chunk_ids().end());
 

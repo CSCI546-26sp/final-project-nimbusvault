@@ -1,10 +1,13 @@
 #include "meta_follower.h"
+#include "../common/clock.h"
 #include <spdlog/spdlog.h>
 
 namespace nimbus {
 
 MetaFollower::MetaFollower(MetaWal& wal, const NodeConfig& cfg, CommitCallback on_commit)
-    : wal_(wal), cfg_(cfg), on_commit_(std::move(on_commit)) {}
+    : wal_(wal), cfg_(cfg), on_commit_(std::move(on_commit)) {
+    last_leader_heartbeat_ms_.store(unix_ms());  // grace period from startup
+}
 
 bool MetaFollower::handle_append(uint64_t leader_term,
                                   uint64_t prev_log_index, uint64_t ,
@@ -92,6 +95,16 @@ uint64_t MetaFollower::local_last_log_index() const {
 
 bool MetaFollower::read_entry(uint64_t log_index, WalEntry& out) const {
     return wal_.read_entry(log_index, out);
+}
+
+void MetaFollower::record_leader_heartbeat() {
+    last_leader_heartbeat_ms_.store(unix_ms());
+}
+
+bool MetaFollower::leader_is_dead(uint64_t now_ms, uint64_t timeout_ms) const {
+    uint64_t last = last_leader_heartbeat_ms_.load();
+    if (last == 0) return false;
+    return (now_ms - last) > timeout_ms;
 }
 
 } // namespace nimbus

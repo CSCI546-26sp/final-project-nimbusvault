@@ -8,6 +8,7 @@
 #include "meta.grpc.pb.h"
 #include "meta_repl.grpc.pb.h"
 #include <grpcpp/grpcpp.h>
+#include <atomic>
 #include <memory>
 
 namespace nimbus {
@@ -44,12 +45,16 @@ public:
                                const nimbus::meta::HeartbeatReq* req,
                                nimbus::meta::HeartbeatResp* resp) override;
 
+    // Atomically promote this service from follower to leader.
+    // Safe to call from any thread; RPCs are immediately served as leader.
+    void promote(MetaReplication* repl, AdaptivePolicy* policy, ReconfigDriver* reconfig);
+
 private:
     MetaCoordinator& coord_;
-    MetaReplication* repl_;
+    std::atomic<MetaReplication*> repl_;
     NodeConfig       cfg_;
-    AdaptivePolicy*  policy_;
-    ReconfigDriver*  reconfig_;
+    std::atomic<AdaptivePolicy*>  policy_;
+    std::atomic<ReconfigDriver*>  reconfig_;
 };
 class MetaReplService final : public nimbus::repl::MetaReplication::Service {
 public:

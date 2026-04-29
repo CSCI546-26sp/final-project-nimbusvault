@@ -35,11 +35,7 @@ ChunkStore::ChunkStore(const std::string& data_dir) : impl_(new Impl()) {
     rocksdb::Options opts;
     opts.create_if_missing = true;
 
-    rocksdb::DB* raw_db = nullptr;
-    auto s = rocksdb::DB::Open(opts, data_dir, &raw_db);
-    if (s.ok()) {
-        impl_->db.reset(raw_db);
-    }
+    auto s = rocksdb::DB::Open(opts, data_dir, &impl_->db);
     (void)s;
 }
 

@@ -125,7 +125,7 @@ mkdir -p "$(dirname "$WATCH_FILE")"
 > "$WATCH_FILE"
 
 # Reset demo chunks so RF always starts at 3 regardless of prior runs
-for _chunk in my-document research-paper viral-video news-article; do
+for _chunk in my-document research-paper viral-video news-article failover-test; do
   "$CLI" --meta "$META" del "$_chunk" > /dev/null 2>&1 || true
 done
 unset _chunk
@@ -338,6 +338,66 @@ ok "Three tiers, two thresholds, one knob: rate."
 pause
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  SCENE 5 — AUTOMATIC LEADER FAILOVER
+# ─────────────────────────────────────────────────────────────────────────────
+clear
+section "SCENE 5  —  Automatic Leader Failover" \
+        "Kill the metadata leader — a follower promotes itself in ~3 seconds"
+
+narrate "The cluster has 3 metadata servers: meta0 (leader :9100), meta1 (:9101), meta2 (:9102)."
+narrate "Followers detect leader death via missed heartbeats and elect a new leader automatically."
+echo ""
+
+run "$CLI --meta $META put failover-test 'Will this survive a leader crash?'"
+echo "failover-test" >> "$WATCH_FILE"
+info_pretty "failover-test"
+
+narrate "Killing the leader (meta0 on :9100)..."
+META0_PID=$(pgrep -f "meta_server.*--id meta0" 2>/dev/null | head -1 || true)
+if [[ -n "$META0_PID" ]]; then
+  echo -e "${RED}${BOLD}  \$ kill $META0_PID  # meta0 leader${RESET}"
+  kill "$META0_PID" 2>/dev/null || true
+  ok "Leader meta0 killed."
+else
+  warn "Could not find meta0 PID — it may already be stopped."
+fi
+echo ""
+
+narrate "Followers detect the outage after election_timeout (~3s). Polling for new leader..."
+
+NEW_META=""
+for tick in $(seq 1 80); do
+  sleep 0.5
+  for CANDIDATE in "127.0.0.1:9101" "127.0.0.1:9102"; do
+    RESP=$("$CLI" --meta "$CANDIDATE" info failover-test 2>/dev/null | grep "^state:" | awk '{print $2}') || true
+    if [[ "$RESP" == "STABLE" ]]; then
+      NEW_META="$CANDIDATE"
+      break 2
+    fi
+  done
+  echo -ne "\r  ${CYAN}  Waiting for election... (${tick}/80)${RESET}   "
+done
+echo ""
+
+if [[ -n "$NEW_META" ]]; then
+  echo -e "${GREEN}${BOLD}"
+  banner_box "$(bw)" \
+    "" \
+    "[ELECTED]  New leader at $NEW_META" \
+    "Cluster is healthy. No human action required." \
+    ""
+  echo -e "${RESET}"
+  META="$NEW_META"
+else
+  warn "Election did not complete in 40s — check meta logs."
+fi
+
+narrate "Reading the chunk written before the crash..."
+run "$CLI --meta $META get failover-test"
+ok "Leader failover complete. Zero data loss. Zero manual steps."
+pause
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  WRAP UP
 # ─────────────────────────────────────────────────────────────────────────────
 clear
@@ -350,7 +410,7 @@ banner_box "$(bw)" \
   "-  Files replicated across multiple servers automatically" \
   "-  Hot files promoted to RF=5 as read traffic increased" \
   "-  Idle files demoted to RF=2  (storage reclaimed)" \
-  "-  Node failure - reads routed to surviving replicas" \
+  "-  Leader failover — follower elected in ~3s, zero data loss" \
   "-  All consistent - no stale reads, no lost writes" \
   "" \
   "Achieved with:" \

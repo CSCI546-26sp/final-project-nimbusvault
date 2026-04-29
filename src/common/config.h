@@ -19,6 +19,7 @@ struct NodeConfig {
     uint32_t quorum_timeout_ms      = 2000;
 
     uint32_t stats_interval_ms = 1000;
+    uint32_t election_timeout_ms = 3000;
 };
 
 struct PolicyConfig {

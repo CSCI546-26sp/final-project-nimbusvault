@@ -23,7 +23,10 @@
 #include <memory>
 #include "storage.grpc.pb.h"
 
-static std::atomic<bool> g_running{true};
+static std::atomic<bool>             g_running{true};
+static std::atomic<nimbus::MetaReplication*> g_active_repl{nullptr};
+static std::atomic<nimbus::AdaptivePolicy*>  g_active_policy{nullptr};
+static std::atomic<nimbus::ReconfigDriver*>  g_active_reconfig{nullptr};
 
 static void sig_handler(int) { g_running = false; }
 
@@ -290,26 +293,22 @@ int main(int argc, char** argv) {
     nimbus::MetaReplication* repl    = nullptr;
     nimbus::MetaFollower*    follower = nullptr;
 
+    auto make_commit_cb = [&](uint64_t idx) {
+        nimbus::WalEntry e;
+        if (!wal.read_entry(idx, e)) {
+            spdlog::warn("on_commit: missing WAL entry idx={}", idx);
+            return;
+        }
+        apply_wal_entry(coord, e);
+    };
+
     if (cfg.role == "leader") {
-        repl = new nimbus::MetaReplication(wal, cfg, [&](uint64_t idx) {
-            nimbus::WalEntry e;
-            if (!wal.read_entry(idx, e)) {
-                spdlog::warn("on_commit: missing WAL entry idx={}", idx);
-                return;
-            }
-            apply_wal_entry(coord, e);
-        });
+        repl = new nimbus::MetaReplication(wal, cfg, make_commit_cb);
         for (auto& peer : cfg.peers) repl->add_follower(peer);
+        g_active_repl.store(repl);
         spdlog::info("Leader ready with {} followers", cfg.peers.size());
     } else {
-        follower = new nimbus::MetaFollower(wal, cfg, [&](uint64_t idx) {
-            nimbus::WalEntry e;
-            if (!wal.read_entry(idx, e)) {
-                spdlog::warn("follower on_commit: missing WAL entry idx={}", idx);
-                return;
-            }
-            apply_wal_entry(coord, e);
-        });
+        follower = new nimbus::MetaFollower(wal, cfg, make_commit_cb);
         spdlog::info("Follower ready, leader at {}", cfg.peers.empty() ? "?" : cfg.peers[0]);
     }
 
@@ -319,11 +318,13 @@ int main(int argc, char** argv) {
     nimbus::Placement*       placement_ptr = nullptr;
 
     if (cfg.role == "leader" && cfg.mode == "adaptive") {
-        nimbus::PlacementConfig pcfg;  // multi-dim scoring (random_placement = false)
+        nimbus::PlacementConfig pcfg;
         placement_ptr = new nimbus::Placement(pcfg);
-        nimbus::PolicyConfig policy_cfg;  // defaults: cold_rf=2 warm_rf=3 hot_rf=5
+        nimbus::PolicyConfig policy_cfg;
         policy_ptr    = new nimbus::AdaptivePolicy(policy_cfg);
         reconfig_ptr  = new nimbus::ReconfigDriver(coord, *repl, *placement_ptr);
+        g_active_policy.store(policy_ptr);
+        g_active_reconfig.store(reconfig_ptr);
         spdlog::info("Adaptive policy engine enabled");
     }
 
@@ -350,25 +351,80 @@ int main(int argc, char** argv) {
         (void)bootstrap_follower_from_leader(*follower, snapshot, cfg);
     }
 
+    // ── Election thread (follower only) ───────────────────────────────────
+    std::thread election_thread([&]() {
+        if (!follower) return;
+
+        // Node-index jitter added to the election timeout itself — not just a
+        // startup sleep. Both followers detect the dead leader at the same
+        // wall-clock time; making meta1 require a longer elapsed period means
+        // it fires first and its first AppendEntry resets meta2's timer before
+        // meta2's (longer) timeout expires.
+        // meta1: effective = 3000 + 1500 = 4500ms
+        // meta2: effective = 3000 + 3000 = 6000ms
+        uint32_t node_idx = 0;
+        for (char c : cfg.node_id) {
+            if (std::isdigit(static_cast<unsigned char>(c)))
+                node_idx = node_idx * 10 + static_cast<uint32_t>(c - '0');
+        }
+        const uint32_t effective_timeout_ms =
+            cfg.election_timeout_ms + node_idx * (cfg.election_timeout_ms / 2);
+
+        while (g_running) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (g_active_repl.load()) return; // already promoted
+            if (!follower->leader_is_dead(nimbus::unix_ms(), effective_timeout_ms)) continue;
+
+            spdlog::info("Election timeout — {} promoting to leader", cfg.node_id);
+
+            auto* new_repl = new nimbus::MetaReplication(wal, cfg, make_commit_cb);
+            for (auto& peer : cfg.peers) new_repl->add_follower(peer);
+
+            nimbus::Placement*      new_placement = nullptr;
+            nimbus::AdaptivePolicy* new_policy    = nullptr;
+            nimbus::ReconfigDriver* new_reconfig  = nullptr;
+
+            if (cfg.mode == "adaptive") {
+                nimbus::PlacementConfig pcfg;
+                new_placement = new nimbus::Placement(pcfg);
+                nimbus::PolicyConfig policy_cfg;
+                new_policy   = new nimbus::AdaptivePolicy(policy_cfg);
+                new_reconfig = new nimbus::ReconfigDriver(coord, *new_repl, *new_placement);
+            }
+
+            g_active_repl.store(new_repl);
+            g_active_policy.store(new_policy);
+            g_active_reconfig.store(new_reconfig);
+            client_svc.promote(new_repl, new_policy, new_reconfig);
+            spdlog::info("Promoted to leader: {}", cfg.node_id);
+            return;
+        }
+    });
+
     // ── Background: heartbeat timer + stale node eviction + policy eval ──
     std::thread hb_thread([&]() {
         uint32_t policy_tick = 0;
-        const uint32_t policy_every = 10; // evaluate policy every 10 heartbeat intervals (~2s)
+        const uint32_t policy_every = 10;
         while (g_running) {
             std::this_thread::sleep_for(
                 std::chrono::milliseconds(cfg.heartbeat_interval_ms));
-            if (repl) repl->send_heartbeats();
+
+            auto* active_repl     = g_active_repl.load();
+            auto* active_policy   = g_active_policy.load();
+            auto* active_reconfig = g_active_reconfig.load();
+
+            if (active_repl) active_repl->send_heartbeats();
             coord.evict_stale_nodes(nimbus::unix_ms(), cfg.follower_timeout_ms * 5);
 
-            if (policy_ptr && reconfig_ptr && ++policy_tick >= policy_every) {
+            if (active_policy && active_reconfig && ++policy_tick >= policy_every) {
                 policy_tick = 0;
                 auto chunks = coord.get_chunks();
                 for (const auto& c : chunks) {
-                    auto dec = policy_ptr->evaluate(c.chunk_id);
+                    auto dec = active_policy->evaluate(c.chunk_id);
                     if (dec.changed && dec.new_rf != c.replication_factor) {
                         spdlog::info("policy: chunk={} tier-change rf {} → {}",
                                      c.chunk_id, c.replication_factor, dec.new_rf);
-                        reconfig_ptr->reconfig(c.chunk_id, dec.new_rf);
+                        active_reconfig->reconfig(c.chunk_id, dec.new_rf);
                     }
                 }
             }
@@ -383,6 +439,7 @@ int main(int argc, char** argv) {
     spdlog::info("Shutting down...");
     server->Shutdown();
     hb_thread.join();
+    election_thread.join();
 
     delete reconfig_ptr;
     delete policy_ptr;

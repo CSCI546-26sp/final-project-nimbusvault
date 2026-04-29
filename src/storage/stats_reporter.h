@@ -25,8 +25,11 @@ private:
     float compute_load_fraction() const;
     bool compute_disk_usage(uint64_t& free_bytes, uint64_t& total_bytes) const;
 
+    void reconnect(const std::string& addr);
+
     NodeConfig cfg_;
-    std::string meta_addr_;
+    std::vector<std::string> meta_addrs_;
+    size_t current_meta_idx_ = 0;
     std::atomic<bool> stopped_{false};
 
     std::shared_ptr<grpc::Channel> channel_;

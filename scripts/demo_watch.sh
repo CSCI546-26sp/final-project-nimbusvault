@@ -4,6 +4,13 @@ set -euo pipefail
 CLI="./build/nimbus_cli"
 META="127.0.0.1:9100"
 WATCH_FILE="/tmp/nimbusvault/demo_chunks.txt"
+
+for arg in "$@"; do
+  case $arg in
+    --meta=*) META="${arg#*=}" ;;
+    --meta)   shift; META="$1" ;;
+  esac
+done
 TRANS_DIR="/tmp/nimbusvault/trans_log"
 mkdir -p "$TRANS_DIR"
 

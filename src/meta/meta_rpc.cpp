@@ -91,12 +91,26 @@ MetaRpcService::MetaRpcService(MetaCoordinator& coord,
                                 const NodeConfig& cfg,
                                 AdaptivePolicy* policy,
                                 ReconfigDriver* reconfig)
-    : coord_(coord), repl_(repl), cfg_(cfg), policy_(policy), reconfig_(reconfig) {}
+    : coord_(coord), cfg_(cfg) {
+    repl_.store(repl);
+    policy_.store(policy);
+    reconfig_.store(reconfig);
+}
+
+void MetaRpcService::promote(MetaReplication* repl, AdaptivePolicy* policy,
+                              ReconfigDriver* reconfig) {
+    // Store in dependency order: repl last so callers see consistent state.
+    policy_.store(policy);
+    reconfig_.store(reconfig);
+    repl_.store(repl);
+    spdlog::info("MetaRpcService: promoted to leader");
+}
 
 grpc::Status MetaRpcService::PutChunk(grpc::ServerContext*,
                                        const nimbus::meta::PutChunkReq* req,
                                        nimbus::meta::PutChunkResp* resp) {
-    if (!repl_) {
+    auto* repl = repl_.load();
+    if (!repl) {
         resp->set_ok(false);
         resp->set_error("NotLeader");
         return grpc::Status::OK;
@@ -158,7 +172,7 @@ grpc::Status MetaRpcService::PutChunk(grpc::ServerContext*,
                           std::to_string(version) + "|";
     for (auto& n : replica_entries) payload += n + ",";
 
-    auto result = repl_->write(WalEntryType::PUT_CHUNK, payload);
+    auto result = repl->write(WalEntryType::PUT_CHUNK, payload);
     if (result != WriteResult::OK) {
         for (const auto& addr : successful_addrs) {
             delete_chunk_from_replica(addr, req->chunk_id());
@@ -177,7 +191,7 @@ grpc::Status MetaRpcService::PutChunk(grpc::ServerContext*,
 grpc::Status MetaRpcService::GetChunkInfo(grpc::ServerContext*,
                                            const nimbus::meta::ChunkInfoReq* req,
                                            nimbus::meta::ChunkInfoResp* resp) {
-    if (!repl_) {
+    if (!repl_.load()) {
         resp->set_ok(false);
         resp->set_error("NotLeader");
         return grpc::Status::OK;
@@ -210,12 +224,13 @@ grpc::Status MetaRpcService::GetChunkInfo(grpc::ServerContext*,
 grpc::Status MetaRpcService::DeleteChunk(grpc::ServerContext*,
                                           const nimbus::meta::DeleteChunkReq* req,
                                           nimbus::meta::DeleteChunkResp* resp) {
-    if (!repl_) {
+    auto* repl = repl_.load();
+    if (!repl) {
         resp->set_ok(false);
         resp->set_error("NotLeader");
         return grpc::Status::OK;
     }
-    auto result = repl_->write(WalEntryType::DELETE_CHUNK, req->chunk_id());
+    auto result = repl->write(WalEntryType::DELETE_CHUNK, req->chunk_id());
     resp->set_ok(result == WriteResult::OK);
     if (result != WriteResult::OK) resp->set_error("quorum unavailable");
     return grpc::Status::OK;
@@ -224,7 +239,8 @@ grpc::Status MetaRpcService::DeleteChunk(grpc::ServerContext*,
 grpc::Status MetaRpcService::AddReplica(grpc::ServerContext*,
                                          const nimbus::meta::ReplicaChangeReq* req,
                                          nimbus::meta::ReplicaChangeResp* resp) {
-    if (!repl_ || !reconfig_) {
+    auto* reconfig = reconfig_.load();
+    if (!repl_.load() || !reconfig) {
         resp->set_ok(false);
         resp->set_error("NotLeader");
         return grpc::Status::OK;
@@ -246,7 +262,7 @@ grpc::Status MetaRpcService::AddReplica(grpc::ServerContext*,
         return grpc::Status::OK;
     }
     int new_rf = static_cast<int>(entry->replica_set.size()) + 1;
-    bool ok = reconfig_->reconfig(req->chunk_id(), new_rf, req->node_id(), "");
+    bool ok = reconfig->reconfig(req->chunk_id(), new_rf, req->node_id(), "");
     resp->set_ok(ok);
     if (!ok) resp->set_error("reconfig failed");
     return grpc::Status::OK;
@@ -255,7 +271,8 @@ grpc::Status MetaRpcService::AddReplica(grpc::ServerContext*,
 grpc::Status MetaRpcService::RemoveReplica(grpc::ServerContext*,
                                             const nimbus::meta::ReplicaChangeReq* req,
                                             nimbus::meta::ReplicaChangeResp* resp) {
-    if (!repl_ || !reconfig_) {
+    auto* reconfig = reconfig_.load();
+    if (!repl_.load() || !reconfig) {
         resp->set_ok(false);
         resp->set_error("NotLeader");
         return grpc::Status::OK;
@@ -277,7 +294,7 @@ grpc::Status MetaRpcService::RemoveReplica(grpc::ServerContext*,
         return grpc::Status::OK;
     }
     int new_rf = static_cast<int>(entry->replica_set.size()) - 1;
-    bool ok = reconfig_->reconfig(req->chunk_id(), new_rf, "", req->node_id());
+    bool ok = reconfig->reconfig(req->chunk_id(), new_rf, "", req->node_id());
     resp->set_ok(ok);
     if (!ok) resp->set_error("reconfig failed");
     return grpc::Status::OK;
@@ -286,24 +303,26 @@ grpc::Status MetaRpcService::RemoveReplica(grpc::ServerContext*,
 grpc::Status MetaRpcService::NodeHeartbeat(grpc::ServerContext*,
                                             const nimbus::meta::HeartbeatReq* req,
                                             nimbus::meta::HeartbeatResp* resp) {
-    if (!repl_) {
+    auto* repl   = repl_.load();
+    auto* policy = policy_.load();
+    if (!repl) {
         resp->set_ok(false);
         if (!cfg_.peers.empty()) resp->set_leader_hint(cfg_.peers.front());
         return grpc::Status::OK;
     }
 
     const std::string payload = encode_heartbeat_payload(*req);
-    auto result = repl_->write(WalEntryType::NODE_HEARTBEAT, payload);
+    auto result = repl->write(WalEntryType::NODE_HEARTBEAT, payload);
     if (result != WriteResult::OK) {
         resp->set_ok(false);
         resp->set_leader_hint(cfg_.address);
         return grpc::Status::OK;
     }
 
-    if (policy_) {
+    if (policy) {
         const uint64_t window_ms = static_cast<uint64_t>(cfg_.heartbeat_interval_ms);
         for (const auto& [chunk_id, count] : req->chunk_access_counts()) {
-            policy_->record_accesses(chunk_id, static_cast<uint64_t>(count), window_ms);
+            policy->record_accesses(chunk_id, static_cast<uint64_t>(count), window_ms);
         }
     }
 
@@ -332,6 +351,7 @@ MetaReplService::MetaReplService(MetaFollower& follower,
 grpc::Status MetaReplService::AppendEntry(grpc::ServerContext*,
                                            const nimbus::repl::AppendEntryReq* req,
                                            nimbus::repl::AppendEntryResp* resp) {
+    follower_.record_leader_heartbeat();
     const auto& e = req->entry();
     bool ok = follower_.handle_append(
         req->leader_term(),

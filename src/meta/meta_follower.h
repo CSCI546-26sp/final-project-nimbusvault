@@ -4,6 +4,7 @@
 #include <functional>
 #include <string>
 #include <cstdint>
+#include <atomic>
 
 namespace nimbus {
 
@@ -33,12 +34,16 @@ public:
     uint64_t current_term() const { return current_term_; }
     MetaWal& wal() const { return wal_; }
 
+    void record_leader_heartbeat();
+    bool leader_is_dead(uint64_t now_ms, uint64_t timeout_ms) const;
+
 private:
     MetaWal&       wal_;
     NodeConfig     cfg_;
     CommitCallback on_commit_;
     uint64_t       current_term_ = 0;
     uint64_t       snapshot_lsn_  = 0;
+    std::atomic<uint64_t> last_leader_heartbeat_ms_{0};
 };
 
 } // namespace nimbus

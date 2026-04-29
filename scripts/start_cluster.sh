@@ -81,7 +81,7 @@ echo "Starting follower 1 (meta1) on :$F1_PORT ..."
   --role follower \
   --id meta1 \
   --listen "127.0.0.1:$F1_PORT" \
-  --peers "127.0.0.1:$LEADER_PORT" \
+  --peers "127.0.0.1:$LEADER_PORT,127.0.0.1:$F2_PORT" \
   --data "$DATA_ROOT/meta1" \
   --mode "$MODE" \
   > "$DATA_ROOT/meta1/stdout.log" 2>&1 &
@@ -93,7 +93,7 @@ echo "Starting follower 2 (meta2) on :$F2_PORT ..."
   --role follower \
   --id meta2 \
   --listen "127.0.0.1:$F2_PORT" \
-  --peers "127.0.0.1:$LEADER_PORT" \
+  --peers "127.0.0.1:$LEADER_PORT,127.0.0.1:$F1_PORT" \
   --data "$DATA_ROOT/meta2" \
   --mode "$MODE" \
   > "$DATA_ROOT/meta2/stdout.log" 2>&1 &
@@ -107,7 +107,7 @@ for i in $(seq 0 $((N_STORAGE - 1))); do
     --id "sn$i" \
     --listen "127.0.0.1:$PORT" \
     --data "$DATA_ROOT/storage$i" \
-    --meta "127.0.0.1:$LEADER_PORT" \
+    --meta "127.0.0.1:$LEADER_PORT,127.0.0.1:$F1_PORT,127.0.0.1:$F2_PORT" \
     --capacity 10737418240 \
     > "$DATA_ROOT/storage$i/stdout.log" 2>&1 &
   echo $! >> "$PID_FILE"
