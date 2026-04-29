@@ -329,6 +329,53 @@ ok "Every file the system acknowledges — is durably saved."
 pause
 
 # ─────────────────────────────────────────────────────────────────────────────
+#  SCENE 6 — COLD DEMOTION
+# ─────────────────────────────────────────────────────────────────────────────
+clear
+section "SCENE 6  —  Cold Demotion" \
+        "What goes up must come down — quiet chunks shed replicas"
+
+narrate "viral-video is at RF=5 [HOT]. The read loop is dead — no traffic."
+narrate "research-paper has been quiet the whole demo."
+narrate "Policy needs ${YELLOW}demote_windows=3${RESET} consecutive low-rate windows."
+narrate "Watch the right terminal — RF should fall on its own."
+echo ""
+
+DEMOTED_VIRAL=0
+DEMOTED_PAPER=0
+for tick in $(seq 1 60); do
+  sleep 0.5
+  RF_VIRAL=$("$CLI" --meta "$META" info viral-video    2>/dev/null | grep "^rf:" | awk '{print $2}') || RF_VIRAL="?"
+  RF_PAPER=$("$CLI" --meta "$META" info research-paper 2>/dev/null | grep "^rf:" | awk '{print $2}') || RF_PAPER="?"
+
+  [[ "$RF_VIRAL" == "2" || "$RF_VIRAL" == "3" ]] && DEMOTED_VIRAL=1
+  [[ "$RF_PAPER" == "2" ]]                       && DEMOTED_PAPER=1
+
+  echo -ne "\r  ${CYAN}  viral-video RF=${RF_VIRAL}   research-paper RF=${RF_PAPER}   (tick ${tick}/60)${RESET}   "
+  if [[ "$DEMOTED_VIRAL" == "1" && "$DEMOTED_PAPER" == "1" ]]; then break; fi
+done
+echo ""
+echo ""
+
+if [[ "$DEMOTED_VIRAL" == "1" || "$DEMOTED_PAPER" == "1" ]]; then
+  echo -e "${GREEN}${BOLD}"
+  banner_box "$(bw)" \
+    "" \
+    "[DEMOTED]  Idle chunks shed replicas automatically" \
+    "Same policy engine — promotes hot data, reclaims cold space." \
+    ""
+  echo -e "${RESET}"
+else
+  warn "No demotion observed in 30s — check policy demote_windows / cold_threshold."
+fi
+
+info_pretty "viral-video"
+info_pretty "research-paper"
+
+ok "Storage reclaimed without anyone touching a config file."
+pause
+
+# ─────────────────────────────────────────────────────────────────────────────
 #  WRAP UP
 # ─────────────────────────────────────────────────────────────────────────────
 clear
@@ -340,7 +387,7 @@ banner_box "$(bw)" \
   "" \
   "-  Files replicated across multiple servers automatically" \
   "-  Hot files promoted to RF=5 as read traffic increased" \
-  "-  Cold files stayed at RF=3  (saves storage space)" \
+  "-  Idle files demoted to RF=2  (storage reclaimed)" \
   "-  Node failure - reads routed to surviving replicas" \
   "-  All consistent - no stale reads, no lost writes" \
   "" \

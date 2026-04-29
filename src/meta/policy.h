@@ -15,7 +15,15 @@ struct ChunkAccessState {
     uint64_t last_update_ms = 0;
     int      windows_above  = 0;   // consecutive windows above threshold
     int      windows_below  = 0;   // consecutive windows below threshold
-    ChunkTier tier          = ChunkTier::COLD;
+    // Match the initial RF assigned by put (warm_rf). If a chunk receives no
+    // heartbeat updates, hysteresis can then drive it down to COLD.
+    ChunkTier tier          = ChunkTier::WARM;
+
+    // Accumulator filled by record_accesses() between evaluations, drained by
+    // evaluate(). A chunk with no heartbeats in the window resolves to rate=0
+    // rather than sticking at its last reported rate forever.
+    uint64_t pending_count     = 0;
+    uint64_t pending_window_ms = 0;
 };
 
 struct PolicyDecision {
