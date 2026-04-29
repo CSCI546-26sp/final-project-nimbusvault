@@ -5,6 +5,20 @@ CLI="./build/nimbus_cli"
 META="127.0.0.1:9100"
 WATCH_FILE="/tmp/nimbusvault/demo_chunks.txt"
 PID_FILE="/tmp/nimbusvault/cluster.pids"
+META_COUNT=3
+STORAGE_COUNT=0
+
+if [[ -f "$PID_FILE" ]]; then
+  TOTAL_PROCS=$(wc -l < "$PID_FILE" 2>/dev/null || echo 0)
+  if [[ "$TOTAL_PROCS" =~ ^[0-9]+$ ]] && (( TOTAL_PROCS > META_COUNT )); then
+    STORAGE_COUNT=$(( TOTAL_PROCS - META_COUNT ))
+  fi
+fi
+
+STORAGE_COUNT_DISPLAY="$STORAGE_COUNT"
+if [[ "$STORAGE_COUNT_DISPLAY" -eq 0 ]]; then
+  STORAGE_COUNT_DISPLAY="storage"
+fi
 
 # ── colours ───────────────────────────────────────────────────────────────────
 RESET='\033[0m'
@@ -150,10 +164,10 @@ pause
 # ─────────────────────────────────────────────────────────────────────────────
 clear
 section "SCENE 1  —  The Cluster Is Alive" \
-        "3 metadata servers + 5 storage servers, all local"
+  "${META_COUNT} metadata servers + ${STORAGE_COUNT_DISPLAY} servers, all local"
 
 narrate "First, let's verify the cluster is running."
-narrate "We have 3 metadata servers (one leader, two backups) and 5 storage servers."
+narrate "We have ${META_COUNT} metadata servers (one leader, two backups) and ${STORAGE_COUNT_DISPLAY} servers."
 
 run "ps aux | grep -E 'meta_server|storage_server' | grep -v grep | awk '{print \$11, \$12, \$13}' | head -10"
 
