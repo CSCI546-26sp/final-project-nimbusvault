@@ -125,7 +125,7 @@ mkdir -p "$(dirname "$WATCH_FILE")"
 > "$WATCH_FILE"
 
 # Reset demo chunks so RF always starts at 3 regardless of prior runs
-for _chunk in my-document research-paper viral-video; do
+for _chunk in my-document research-paper viral-video news-article; do
   "$CLI" --meta "$META" del "$_chunk" > /dev/null 2>&1 || true
 done
 unset _chunk
@@ -206,7 +206,7 @@ info_pretty "viral-video"
 echo "viral-video" >> "$WATCH_FILE"
 
 narrate "RF=3 right now. Starting a continuous read loop in the background..."
-narrate "Policy engine needs 2 consecutive high-rate heartbeat windows to promote (RF=5)."
+narrate "Policy engine needs 3 consecutive high-rate windows (~6s) to promote (RF=5)."
 echo ""
 echo -e "${YELLOW}${BOLD}  \$ (continuous read loop running in background)${RESET}"
 sleep 0.7
@@ -224,7 +224,7 @@ narrate "Reads are live. Polling for promotion to RF=5..."
 echo ""
 
 PROMOTED=0
-for tick in $(seq 1 60); do
+for tick in $(seq 1 90); do
   sleep 0.5
   RF_NOW=$("$CLI"    --meta "$META" info viral-video 2>/dev/null | grep "^rf:"    | awk '{print $2}') || RF_NOW="?"
   STATE_NOW=$("$CLI" --meta "$META" info viral-video 2>/dev/null | grep "^state:" | awk '{print $2}') || STATE_NOW=""
@@ -236,7 +236,7 @@ for tick in $(seq 1 60); do
   elif [[ "$STATE_NOW" == "TRANSITIONING" ]]; then
     echo -ne "\r  ${YELLOW}  RF=${RF_NOW}  TRANSITIONING  (replicating...)${RESET}   "
   else
-    echo -ne "\r  ${CYAN}  RF=${RF_NOW}  ${STATE_NOW:-STABLE}  (tick ${tick}/60)${RESET}   "
+    echo -ne "\r  ${CYAN}  RF=${RF_NOW}  ${STATE_NOW:-STABLE}  (tick ${tick}/90)${RESET}   "
   fi
 done
 kill "$READ_LOOP_PID" 2>/dev/null || true
@@ -308,24 +308,72 @@ fi
 pause
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  SCENE 5 — STRONG CONSISTENCY
+#  SCENE 5 — TAPERED READS: COLD → WARM → COLD
 # ─────────────────────────────────────────────────────────────────────────────
 clear
-section "SCENE 5  —  Strong Consistency" \
-        "The metadata server's safety guarantee"
+section "SCENE 5  —  Tapered Reads" \
+        "Moderate traffic lands viral-video in the WARM band, not HOT"
 
-narrate "The system never lies about what is saved."
-narrate "Storage-first rule: bytes reach a majority of servers BEFORE the metadata server"
-narrate "records that the file exists. Demonstrating an overwrite."
+narrate "viral-video is COLD (RF=2). We now read it at ~0.5 r/s — one get every 2s."
+narrate "Threshold: rate >= 0.1 → WARM, rate > 1.0 → HOT. 0.5 r/s = WARM territory."
+narrate "Expect:  ${WHITE}COLD → WARM${RESET}  (RF 2 → 3) within ~6s of evaluations."
+echo ""
+echo -e "${YELLOW}${BOLD}  \$ (1 get / 2s on viral-video)${RESET}"
+sleep 0.7
 
-run "$CLI --meta $META put my-document 'Updated content — version 2!'"
-run "$CLI --meta $META get my-document"
-info_pretty "my-document"
+_taper_loop() {
+  while true; do
+    "$CLI" --meta "$META" get viral-video > /dev/null 2>&1 || true
+    sleep 2
+  done
+}
+_taper_loop &
+TAPER_PID=$!
+disown "$TAPER_PID"
 
-narrate "Version number incremented. Every replica holds the new data."
-narrate "If the metadata server crashed mid-write, orphan copies are cleaned on restart."
+WARMED=0
+for tick in $(seq 1 60); do
+  sleep 0.5
+  RF_NOW=$("$CLI" --meta "$META" info viral-video 2>/dev/null | grep "^rf:" | awk '{print $2}') || RF_NOW="?"
+  if [[ "$RF_NOW" == "3" ]]; then
+    WARMED=1
+    break
+  fi
+  echo -ne "\r  ${CYAN}  viral-video RF=${RF_NOW}  (waiting for COLD → WARM, tick ${tick}/60)${RESET}   "
+done
+echo ""
 
-ok "Every file the system acknowledges — is durably saved."
+if [[ "$WARMED" == "1" ]]; then
+  ok "viral-video promoted COLD → WARM at moderate read rate."
+else
+  warn "Did not observe COLD → WARM in 30s — taper rate may be too low/high."
+fi
+info_pretty "viral-video"
+
+narrate "Now we kill the taper loop entirely. Rate drops to 0 → expect WARM → COLD."
+kill "$TAPER_PID" 2>/dev/null || true
+echo ""
+
+COOLED=0
+for tick in $(seq 1 60); do
+  sleep 0.5
+  RF_NOW=$("$CLI" --meta "$META" info viral-video 2>/dev/null | grep "^rf:" | awk '{print $2}') || RF_NOW="?"
+  if [[ "$RF_NOW" == "2" ]]; then
+    COOLED=1
+    break
+  fi
+  echo -ne "\r  ${CYAN}  viral-video RF=${RF_NOW}  (waiting for WARM → COLD, tick ${tick}/60)${RESET}   "
+done
+echo ""
+
+if [[ "$COOLED" == "1" ]]; then
+  ok "viral-video demoted WARM → COLD after reads stopped."
+else
+  warn "Did not observe WARM → COLD in 30s."
+fi
+info_pretty "viral-video"
+
+ok "Three tiers, two thresholds, one knob: rate."
 pause
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -340,7 +388,7 @@ banner_box "$(bw)" \
   "" \
   "-  Files replicated across multiple servers automatically" \
   "-  Hot files promoted to RF=5 as read traffic increased" \
-  "-  Cold files stayed at RF=3  (saves storage space)" \
+  "-  Idle files demoted to RF=2  (storage reclaimed)" \
   "-  Node failure - reads routed to surviving replicas" \
   "-  All consistent - no stale reads, no lost writes" \
   "" \

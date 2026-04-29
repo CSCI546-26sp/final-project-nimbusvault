@@ -28,8 +28,8 @@ struct PolicyConfig {
     int    warm_rf         = 3;
     int    hot_rf          = 5;
     double ewma_half_life_s = 60.0;
-    int    promote_windows  = 2;
-    int    demote_windows   = 3;
+    int    promote_windows  = 3;
+    int    demote_windows   = 5;
 };
 
 struct PlacementConfig {

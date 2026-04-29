@@ -8,23 +8,12 @@ namespace nimbus {
 AdaptivePolicy::AdaptivePolicy(const PolicyConfig& cfg) : cfg_(cfg) {}
 
 void AdaptivePolicy::record_accesses(const std::string& chunk_id,
-                                      uint64_t count, uint64_t window_ms) {
+                                      uint64_t count, uint64_t /*window_ms*/) {
     std::lock_guard<std::mutex> lk(mu_);
     auto& s = state_[chunk_id];
-
-    double instant_rate = (window_ms > 0)
-        ? (static_cast<double>(count) / (window_ms / 1000.0))
-        : 0.0;
-    s.last_window_rate = instant_rate;
-
-    if (s.last_update_ms == 0) {
-        s.ewma_rate = instant_rate;
-    } else {
-        double dt_s = window_ms / 1000.0;
-        double alpha = 1.0 - std::exp(-dt_s / cfg_.ewma_half_life_s);
-        s.ewma_rate = alpha * instant_rate + (1.0 - alpha) * s.ewma_rate;
-    }
-    s.last_update_ms = unix_ms();
+    s.pending_count += count;
+    // window_ms is ignored: evaluate() uses wall-clock elapsed time so that a
+    // chunk reported in only 1-of-10 heartbeats doesn't appear 10× hotter.
 }
 
 PolicyDecision AdaptivePolicy::evaluate(const std::string& chunk_id) {
@@ -32,9 +21,28 @@ PolicyDecision AdaptivePolicy::evaluate(const std::string& chunk_id) {
     auto& s = state_[chunk_id];
     ChunkTier old_tier = s.tier;
 
-    // Drive transition hysteresis using the latest window classification.
-    // EWMA is still tracked for metrics/observability via get_rate().
-    ChunkTier desired_tier = classify(s.last_window_rate);
+    // Rate = accesses since last evaluate / wall-clock seconds since last evaluate.
+    // A chunk that received no heartbeat reports this window gets count=0 → rate=0,
+    // which allows hot/warm chunks to decay naturally when traffic stops.
+    const uint64_t now = unix_ms();
+    const double elapsed_s = (s.last_eval_ms > 0)
+        ? std::max(0.1, static_cast<double>(now - s.last_eval_ms) / 1000.0)
+        : 2.0;  // first ever evaluate: assume one policy interval
+
+    double window_rate = static_cast<double>(s.pending_count) / elapsed_s;
+    s.last_window_rate = window_rate;
+
+    if (s.last_update_ms == 0) {
+        s.ewma_rate = window_rate;
+    } else {
+        double alpha = 1.0 - std::exp(-elapsed_s / cfg_.ewma_half_life_s);
+        s.ewma_rate = alpha * window_rate + (1.0 - alpha) * s.ewma_rate;
+    }
+    s.last_update_ms = now;
+    s.last_eval_ms   = now;
+    s.pending_count  = 0;
+
+    ChunkTier desired_tier = classify(window_rate);
 
     bool changed = false;
     if (desired_tier > s.tier) {

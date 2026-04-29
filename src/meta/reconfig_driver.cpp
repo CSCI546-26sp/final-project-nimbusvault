@@ -180,18 +180,38 @@ bool ReconfigDriver::copy_to_new_replicas(const std::string& chunk_id,
     if (src_nodes.empty()) return true;
 
     auto alive = coord_.get_alive_nodes();
-    const std::string src_addr = resolve_address(src_nodes[0], alive);
-    if (src_addr.empty()) {
-        spdlog::error("ReconfigDriver: cannot resolve address for source {}", src_nodes[0]);
-        return false;
+
+    // Nodes already in the old set hold the data — skip copying to them.
+    // This makes pure shrinks (new_nodes ⊆ src_nodes) a no-op and avoids
+    // fetching from a potentially dead src when nothing actually needs copying.
+    std::unordered_set<std::string> src_ids;
+    for (const auto& e : src_nodes) src_ids.insert(extract_node_id(e));
+
+    // Pick the first reachable source, trying all src_nodes in order.
+    std::string src_addr;
+    for (const auto& src : src_nodes) {
+        const std::string addr = resolve_address(src, alive);
+        if (!addr.empty()) { src_addr = addr; break; }
     }
 
     for (const auto& dst_entry : new_nodes) {
+        if (src_ids.count(extract_node_id(dst_entry))) {
+            spdlog::debug("ReconfigDriver: skip copy to {} (already in old set, chunk={})",
+                          extract_node_id(dst_entry), chunk_id);
+            continue;
+        }
+
+        if (src_addr.empty()) {
+            spdlog::error("ReconfigDriver: no reachable source for chunk {}", chunk_id);
+            return false;
+        }
+
         const std::string dst_addr = resolve_address(dst_entry, alive);
         if (dst_addr.empty()) {
             spdlog::error("ReconfigDriver: no address for dest node {}", dst_entry);
             return false;
         }
+
         auto src_channel = grpc::CreateChannel(src_addr, grpc::InsecureChannelCredentials());
         auto src_stub = nimbus::storage::StorageNode::NewStub(src_channel);
 
