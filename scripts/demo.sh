@@ -17,7 +17,7 @@ fi
 
 STORAGE_COUNT_DISPLAY="$STORAGE_COUNT"
 if [[ "$STORAGE_COUNT_DISPLAY" -eq 0 ]]; then
-  STORAGE_COUNT_DISPLAY="storage"
+  STORAGE_COUNT_DISPLAY=$(ps aux | grep 'storage_server' | grep -v grep | wc -l | tr -d ' ')
 fi
 
 # ── colours ───────────────────────────────────────────────────────────────────
@@ -364,8 +364,6 @@ banner_box "$(bw)" \
   "-  Files replicated across multiple servers automatically" \
   "-  Hot files promoted to RF=5 as read traffic increased" \
   "-  Idle files demoted to RF=2  (storage reclaimed)" \
-  "-  Node failure - reads routed to surviving replicas" \
-  "-  All consistent - no stale reads, no lost writes" \
   "" \
   "Achieved with:" \
   "  *  Zero config changes" \
@@ -373,10 +371,6 @@ banner_box "$(bw)" \
   "  *  Zero manual intervention" \
   ""
 echo -e "${RESET}"
-echo ""
-echo -e "${DIM}  Benchmark:  Adaptive mode   655 ops/s  |  2.04 MB/s GET${RESET}"
-echo -e "${DIM}             Baseline mode    536 ops/s  |  1.68 MB/s GET${RESET}"
-echo -e "${DIM}             +22% throughput  |  -33% storage for cold data${RESET}"
 echo ""
 echo -e "${WHITE}  Thank you.${RESET}"
 echo ""
